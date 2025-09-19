@@ -334,27 +334,6 @@ class PipelineProcessor:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data
-    
-        """
-        Shifts a camera transformation matrix so that the origin is centered on the image.
-
-        Args:
-            matrix_cam_trans (numpy.ndarray): The 4x4 camera transformation matrix.
-            width (float): Width of the image in pixels.
-            height (float): Height of the image in pixels.
-            scale (float, optional): Scaling factor to apply to the shift. Defaults to 1.0.
-
-        Returns:
-            numpy.ndarray: The adjusted 4x4 camera transformation matrix.
-        """
-        shift = np.eye(4)
-        shift[0, 3] = -width * 0.5 * scale
-        shift[1, 3] = -height * 0.5 * scale
-
-        return shift @ matrix_cam_trans
-    
-        with Image.open(image_path) as img:
-            return img.width, img.height
 
 
     # ===== Function: get_elevation =====
