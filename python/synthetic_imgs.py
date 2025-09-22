@@ -10,7 +10,7 @@ import json
 from mathutils import Matrix, Vector
 
 
-HDRI_PATH = "/app/tools/hdri/studio.exr"
+HDRI_PATH = "/app/hdri/studio.exr"
 
 
 # ===== Function: parse_arguments =====

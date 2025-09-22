@@ -96,7 +96,7 @@ class PipelineProcessor:
         # Base command
         blender_cmd = [
             "blender", "-b",
-            "--python", "/app/tools/python/synthetic_imgs.py",
+            "--python", "/app/python/synthetic_imgs.py",
             "--", "--input_file", input_file,
             "--output_folder", self.working_dir
         ]
@@ -128,7 +128,7 @@ class PipelineProcessor:
         logger.info("📍 Estimating geolocation...")
 
         geoloc_cmd = [
-            "python3", "/app/tools/python/geoloc_img.py",
+            "python3", "/app/python/geoloc_img.py",
             "-i", self.working_dir,
             "--nr_prediction", str(nr_prediction)
         ]
@@ -136,7 +136,7 @@ class PipelineProcessor:
         res = subprocess.run(geoloc_cmd, capture_output=True, text=True)
 
         if res.returncode != 0:
-            logger.error("❌ Geolocation failed:", res.stderr, file=sys.stderr)
+            logger.error("❌ Geolocation failed")
             raise RuntimeError("Geolocation subprocess failed.")
 
         try:
@@ -144,7 +144,7 @@ class PipelineProcessor:
             lat, lon = data["lat"], data["lon"]
             return lat, lon
         except Exception as e:
-            logger.error("❌ Failed to parse geolocation output:", e, file=sys.stderr)
+            logger.error("❌ Failed to parse geolocation output")
             sys.exit(1)
 
 
@@ -171,7 +171,7 @@ class PipelineProcessor:
         else:
             logger.info("🛰️  Downloading satellite imagery from Google ...")
             ortho_cmd = [
-                "python3", "/app/tools/python/ortho.py",
+                "python3", "/app/python/ortho.py",
                 "--api_key", api_key,
                 "--center_lat", str(lat),
                 "--center_lon", str(lon),
@@ -217,7 +217,7 @@ class PipelineProcessor:
         subprocess.run(dim_cmd_1, capture_output=True, text=True, cwd="/workspace/dim")
 
         dim_cmd_2 = [
-            "python3", "/app/tools/python/georef.py",
+            "python3", "/app/python/georef.py",
             "--ortho", os.path.join(self.working_dir, "images", base_name + ".tif"),
             "--render", os.path.join(self.working_dir, "images", "top_view.png"),
             "--output", os.path.join(self.working_dir, "transformation.txt"),
@@ -493,10 +493,6 @@ class PipelineProcessor:
         translation = [result["translation"][0], 0, result["translation"][1]]
         scale_factors = [result["scale"][0], result["scale"][1], 1.0]
 
-        print (f"T = {translation}")
-        print (f"R = {angle_deg}")
-        print (f"S = {scale_factors}")
-
         # --- Rotation Matrix ---
         angle_rad = np.radians(angle_deg)
         axis = [0, 1, 0]
@@ -534,7 +530,7 @@ class PipelineProcessor:
         logger.info(f"Start Pipeline")
 
         # Generate synthetic views
-        self.generate_synthetic_views(input_file=self.args.input_file, streetviews=3)
+        # self.generate_synthetic_views(input_file=self.args.input_file, streetviews=3)
 
         if (self.args.lat is None and self.args.lon is None):
             # Extimate model geolocation
@@ -546,13 +542,11 @@ class PipelineProcessor:
         # Run Get Elevation Algorithm
         elevation = self.get_elevation(lat, lon)
 
-        print (f"LAT = {lat} - LON = {lon}")
-
         if (self.args.api_key):
             # Download satellite imagery from Google
-            result = self.download_satellite_imagery(self.args.api_key, lat, lon, self.args.area_size_m, self.args.zoom)
+            # result = self.download_satellite_imagery(self.args.api_key, lat, lon, self.args.area_size_m, self.args.zoom)
 
-            if (result):
+            if (True):
                 # Moving DIM input images to subfolder
                 self.move_images_to_subfolder()
 
