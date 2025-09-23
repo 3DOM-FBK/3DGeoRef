@@ -530,7 +530,7 @@ class PipelineProcessor:
         logger.info(f"Start Pipeline")
 
         # Generate synthetic views
-        # self.generate_synthetic_views(input_file=self.args.input_file, streetviews=3)
+        self.generate_synthetic_views(input_file=self.args.input_file, streetviews=3)
 
         if (self.args.lat is None and self.args.lon is None):
             # Extimate model geolocation
@@ -544,17 +544,17 @@ class PipelineProcessor:
 
         if (self.args.api_key):
             # Download satellite imagery from Google
-            # result = self.download_satellite_imagery(self.args.api_key, lat, lon, self.args.area_size_m, self.args.zoom)
+            result = self.download_satellite_imagery(self.args.api_key, lat, lon, self.args.area_size_m, self.args.zoom)
 
-            if (True):
-                # Moving DIM input images to subfolder
-                self.move_images_to_subfolder()
+            # if (result):
+            #     # Moving DIM input images to subfolder
+            #     self.move_images_to_subfolder()
 
-                # Run Deep-Image-Matching Algorithm
-                self.run_deep_image_matching_and_georef(self.base_name)
+            #     # Run Deep-Image-Matching Algorithm
+            #     self.run_deep_image_matching_and_georef(self.base_name)
 
-                # Apply 4x4 transformation matrix to the model
-                self.apply_transform(elevation)
+            #     # Apply 4x4 transformation matrix to the model
+            #     self.apply_transform(elevation)
         
         else:
             logger.info(f"Approximate Location: lat = {lat}, lon = {lon}, elevation = {elevation}")

@@ -233,13 +233,26 @@ def download_area_tiles(center_lat, center_lng, area_side_meters, zoom_level, ap
     downloaded_count = 0
     total_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
 
-    for x in range(min_x, max_x + 1):
-        for y in range(min_y, max_y + 1):
-            session_token = create_google_maps_session(api_key)
-            tile_url = f"https://tile.googleapis.com/v1/2dtiles/{zoom_level}/{x}/{y}?session={session_token}&key={api_key}"
+    # Use Google Maps Tiles API (commented out due to potential 403 errors)
+    # for x in range(min_x, max_x + 1):
+    #     for y in range(min_y, max_y + 1):
+    #         session_token = create_google_maps_session(api_key)
+    #         tile_url = f"https://tile.googleapis.com/v1/2dtiles/{zoom_level}/{x}/{y}?session={session_token}&key={api_key}"
+    #         filename = os.path.join(output_folder, f"tile_z{zoom_level}_x{x}_y{y}.png")
+    #         download_image(tile_url, filename)
+    #         downloaded_count += 1
+
+    # Use Mapbox as alternative source
+    for x in range(min_x, max_x+1):
+        for y in range(min_y, max_y+1):
+            url = f"https://api.mapbox.com/v4/mapbox.satellite/{zoom_level}/{x}/{y}@1x.png?access_token={api_key}"
             filename = os.path.join(output_folder, f"tile_z{zoom_level}_x{x}_y{y}.png")
-            download_image(tile_url, filename)
-            downloaded_count += 1
+            r = requests.get(url)
+            if r.status_code == 200:
+                with open(filename, "wb") as f:
+                    f.write(r.content)
+            else:
+                print(f"Failed to download tile {x},{y}")
     
     return min_x, min_y
 
