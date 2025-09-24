@@ -12,6 +12,7 @@ import platform
 import shutil
 from pyproj import Transformer
 import time
+import sys
 
 
 # ===== Function: parse_args =====
@@ -220,8 +221,8 @@ def download_area_tiles(center_lat, center_lng, area_side_meters, zoom_level, ap
     min_lng = west_lng
     max_lng = east_lng
 
-    min_tile_x, max_tile_y = lat_lng_to_tile(max_lat, min_lng, zoom_level)
-    max_tile_x, min_tile_y = lat_lng_to_tile(min_lat, max_lng, zoom_level)
+    min_tile_x, min_tile_y = lat_lng_to_tile(max_lat, min_lng, zoom_level)
+    max_tile_x, max_tile_y = lat_lng_to_tile(min_lat, max_lng, zoom_level)
 
     min_x = min(min_tile_x, max_tile_x)
     max_x = max(min_tile_x, max_tile_x)

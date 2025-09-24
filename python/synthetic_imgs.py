@@ -386,6 +386,9 @@ def postprocess_model(output_path, corners_world, target_x):
     """
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
 
+    corner = max(corners_world, key=lambda v: (-v.x, v.y))
+    print (corner)
+
     # Move meshes
     for obj in meshes:
         mesh = obj.data
@@ -394,8 +397,8 @@ def postprocess_model(output_path, corners_world, target_x):
         bm.from_mesh(mesh)
         
         for v in bm.verts:
-            v.co.x = v.co.x - corners_world[3][0]
-            v.co.z = v.co.z - corners_world[3][1]
+            v.co.x = v.co.x - corner[0]
+            v.co.y = v.co.y - corner[1]
         
         bm.to_mesh(mesh)
         bm.free()
@@ -451,6 +454,25 @@ def get_ortho_camera_corners():
     return corners_cam
 
 
+def apply_transformations(obj):
+    """
+    Applica le trasformazioni attive (location, rotation, scale)
+    all'oggetto specificato in Blender.
+
+    Args:
+        obj (bpy.types.Object): L'oggetto a cui applicare le trasformazioni.
+    """
+    # Imposta l'oggetto come attivo
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    # Applica tutte le trasformazioni
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+    # Deseleziona l'oggetto
+    obj.select_set(False)
+
+
 # ===== Function: main =====
 if __name__ == "__main__":
     args = parse_arguments()
@@ -466,6 +488,7 @@ if __name__ == "__main__":
     setup_hdri_lighting(HDRI_PATH)
 
     obj = import_model(input_file)
+    apply_transformations(obj)
     res_x, res_y = render_top_ortho_view_from_meshes(os.path.join(output_folder, 'top_view'))
 
     corners_world = get_ortho_camera_corners()

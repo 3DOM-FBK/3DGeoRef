@@ -151,7 +151,7 @@ class PipelineProcessor:
     # ===== Function: download_satellite_imagery =====
     def download_satellite_imagery(self, api_key, lat, lon, area_size_m, zoom):
         """
-        Downloads satellite imagery from Google for a specified geographic location. Requires latitude, longitude,
+        Downloads satellite imagery for a specified geographic location. Requires latitude, longitude,
         area size, zoom level, and an API key. Executes an external Python script as a subprocess and logs the
         progress and any errors encountered during the download.
 
@@ -160,7 +160,7 @@ class PipelineProcessor:
             lon (float): Longitude of the center point for the imagery.
             area_size_m (float): Size of the area to download in meters.
             zoom (int): Zoom level for the satellite imagery.
-            api_key (str): Google API key for accessing satellite imagery.
+            api_key (str): Valid API key for accessing satellite imagery. - Mapbox or Google Maps.
 
         Returns:
             bool: True if the download succeeds, False otherwise.
@@ -169,7 +169,7 @@ class PipelineProcessor:
             logger.info("⚠️  Missing area_size_m or zoom arguments for satellite image download.")
             return False
         else:
-            logger.info("🛰️  Downloading satellite imagery from Google ...")
+            logger.info("🛰️  Downloading satellite imagery ...")
             ortho_cmd = [
                 "python3", "/app/python/ortho.py",
                 "--api_key", api_key,
@@ -179,13 +179,13 @@ class PipelineProcessor:
                 "--zoom", str(zoom),
                 "-o", self.working_dir
             ]
-            # result = subprocess.run(ortho_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            result = subprocess.run(ortho_cmd)
+            result = subprocess.run(ortho_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # result = subprocess.run(ortho_cmd)
             if result.returncode != 0:
-                logger.error("--> ⚠️ Downloading satellite imagery from Google - Error.")
+                logger.error("--> ⚠️ Downloading satellite imagery - Error.")
                 return False
             else: 
-                logger.info("--> ✅ Downloading satellite imagery from Google - Done.")
+                logger.info("--> ✅ Downloading satellite imagery - Done.")
                 return True
 
 
@@ -247,57 +247,6 @@ class PipelineProcessor:
                 src_path = os.path.join(self.working_dir, file_name)
                 dst_path = os.path.join(images_dir, file_name)
                 shutil.move(src_path, dst_path)
-
-
-    # ===== Function: apply_transformation_to_model =====
-    def apply_transformation_to_model(self, model_path, dst_dir, base_name):
-        """
-        Applies a 4x4 transformation matrix to a 3D model to align it with georeferenced coordinates and
-        convert it from GIS to GLTF coordinate conventions. The transformed model is then saved to the
-        specified destination directory.
-
-        Args:
-            model_path (str): Path to the original 3D model file.
-            dst_dir (str): Directory where the transformed model and transformation matrix are located and where the output will be saved.
-            base_name (str): Base name used to save the transformed model with a "_transformed" suffix.
-
-        Returns:
-            None
-        """
-        matrix_path = os.path.join(dst_dir, "transformation.txt")
-
-        if (os.path.isfile(matrix_path)):
-            with open(matrix_path, 'r') as f:
-                lines = f.readlines()
-
-            matrix = np.array([[float(val) for val in line.strip().split()] for line in lines])
-            if matrix.shape != (4, 4):
-                raise ValueError("The transformation matrix must be 4x4.")
-            
-            scale_x = np.linalg.norm(matrix[0, :3])
-            scale_y = np.linalg.norm(matrix[1, :3])
-            matrix[2, :3] *= scale_z
-            
-            gis_to_gltf = np.array([
-                [-1,  0,  0, 0],  # X remains X
-                [0,  0,  -1, 0],  # Z (up in GIS) -> Y (up in GLTF)
-                [0,  1,  0, 0],   # Y (north in GIS) -> Z (forward in GLTF)
-                [0,  0,  0, 1]
-            ])
-            adjusted_matrix = gis_to_gltf @ matrix
-
-            model = trimesh.load(model_path)
-
-            if isinstance(model, trimesh.Scene):
-                for geom in model.geometry.values():
-                    geom.apply_transform(adjusted_matrix)
-            else:
-                model.apply_transform(adjusted_matrix)
-            
-            bbox_min, bbox_max = model.bounds
-            centroid = (bbox_min + bbox_max) / 2.0
-
-            model.export(os.path.join(dst_dir, base_name + "_transformed.obj"))
     
 
     # ===== Function: load_matrix_4x4 =====
@@ -437,12 +386,12 @@ class PipelineProcessor:
             trimesh.Trimesh or trimesh.Scene: The transformed model with its minimum Y aligned to the elevation.
         """
         if isinstance(model, trimesh.Scene):
-            min_y = max([geom.bounds[0,1] for geom in model.geometry.values()])
+            min_z = min([geom.bounds[0,2] for geom in model.geometry.values()])
         else:
-            min_y = model.bounds[0,1]
+            min_z = model.bounds[0,2]
 
-        dy = -(elevation - (-min_y))
-        T = trimesh.transformations.translation_matrix([0,dy,0])
+        dz = elevation - (min_z)
+        T = trimesh.transformations.translation_matrix([0,0,dz])
 
         if isinstance(model, trimesh.Scene):
             for geom in model.geometry.values():
@@ -489,13 +438,13 @@ class PipelineProcessor:
         # Decompose Matrix 4x4 an get values
         result = self.decompose_matrix(matrix_4x4)
 
-        angle_deg = -result["euler_deg"][2]
-        translation = [result["translation"][0], 0, result["translation"][1]]
+        angle_deg = result["euler_deg"][2]
+        translation = [result["translation"][0], result["translation"][1], 0]
         scale_factors = [result["scale"][0], result["scale"][1], 1.0]
 
         # --- Rotation Matrix ---
         angle_rad = np.radians(angle_deg)
-        axis = [0, 1, 0]
+        axis = [0, 0, 1]
         R = trimesh.transformations.rotation_matrix(angle_rad, axis)
 
         # --- Translation Matrix ---
@@ -506,11 +455,11 @@ class PipelineProcessor:
         S = np.eye(4)
         S[0,0] = scale_factors[0]
         S[1,1] = scale_factors[1]
-        S[2,2] = scale_factors[2]
+        S[2,2] = np.mean([scale_factors[0], scale_factors[1]])
 
         transform = T @ R @ S
 
-        # # Apply transformation
+        # Apply transformation
         if isinstance(model, trimesh.Scene):
             for geom in model.geometry.values():
                 geom.apply_transform(transform)
@@ -521,8 +470,11 @@ class PipelineProcessor:
         model = self.align_min_z_to_elevation(model, elevation)
         
         # Export model
-        file_path = os.path.join(self.args.output_folder, self.base_name+"_georef.obj")
-        model.export(file_path, file_type="obj", digits=15, include_texture=True)
+        out_path = os.path.join(self.args.output_folder, self.base_name)
+        file_path = os.path.join(out_path, self.base_name+"_georef.obj")
+
+        os.makedirs(out_path, exist_ok=True)
+        model.export(file_path, file_type="obj", digits=15, include_texture=False)
 
 
     # ===== Function: run_pipeline =====
@@ -537,7 +489,7 @@ class PipelineProcessor:
             lat, lon = self.estimate_geolocation(self.args.nr_prediction)
         else:
             lat = self.args.lat
-            lon = self-args.lon
+            lon = self.args.lon
 
         # Run Get Elevation Algorithm
         elevation = self.get_elevation(lat, lon)
@@ -546,15 +498,15 @@ class PipelineProcessor:
             # Download satellite imagery from Google
             result = self.download_satellite_imagery(self.args.api_key, lat, lon, self.args.area_size_m, self.args.zoom)
 
-            # if (result):
-            #     # Moving DIM input images to subfolder
-            #     self.move_images_to_subfolder()
+            if (True):
+                # Moving DIM input images to subfolder
+                self.move_images_to_subfolder()
 
-            #     # Run Deep-Image-Matching Algorithm
-            #     self.run_deep_image_matching_and_georef(self.base_name)
+                # Run Deep-Image-Matching Algorithm
+                self.run_deep_image_matching_and_georef(self.base_name)
 
-            #     # Apply 4x4 transformation matrix to the model
-            #     self.apply_transform(elevation)
+                # Apply 4x4 transformation matrix to the model
+                self.apply_transform(elevation)
         
         else:
             logger.info(f"Approximate Location: lat = {lat}, lon = {lon}, elevation = {elevation}")

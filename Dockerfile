@@ -70,8 +70,7 @@ WORKDIR /workspace/dim
 # Checkout the specified branch
 RUN git checkout dev
 
-RUN sed -i '30s/^# *//' /workspace/dim/demo.py
-RUN sed -i '31s/^# *//' /workspace/dim/demo.py
+RUN sed -i '30,31s/^# *//' /workspace/dim/demo.py
 
 # RUN sed -i 's/torch.load(\(.*\)map_location=self._device)/torch.load(\1map_location=self._device, weights_only=False)/' /workspace/dim/src/deep_image_matching/matchers/se2loftr.py
 # RUN sed -i "s|fr'{input_dir}\\\\features.h5'|os.path.join(input_dir, 'features.h5')|g" /workspace/dim/src/deep_image_matching/utils/loftr_roma_to_multiview.py
