@@ -38,8 +38,9 @@ def parse_args():
     parser.add_argument("--api_key", type=str, help="Google Cloud Platform API key.")
     parser.add_argument("--area_size_m", type=str, default="200", help="Side length of the square area to download (in meters).")
     parser.add_argument("--zoom", type=str, default="18", help="Zoom level (e.g., 18 or 20).")
-    parser.add_argument("--lat", type=str, default=None,help="Latitude of 3d model")
-    parser.add_argument("--lon", type=str, default=None,help="Longitude of 3d mode")
+    parser.add_argument("--lat", type=str, default=None, help="Latitude of 3d model")
+    parser.add_argument("--lon", type=str, default=None, help="Longitude of 3d mode")
+    parser.add_argument("--ortho", type=str, default=None, help="Orthophoto image to use for georeferencing")
     
     return parser.parse_args()
 
@@ -479,38 +480,38 @@ class PipelineProcessor:
 
     # ===== Function: run_pipeline =====
     def run_pipeline(self):
-        logger.info(f"Start Pipeline")
+        logger.info("Start Pipeline")
 
-        # Generate synthetic views
+        # Step 1: Generate synthetic views
         self.generate_synthetic_views(input_file=self.args.input_file, streetviews=3)
 
-        if (self.args.lat is None and self.args.lon is None):
-            # Extimate model geolocation
+        # Step 2: Get geolocation (predicted or provided)
+        if self.args.lat is None or self.args.lon is None:
             lat, lon = self.estimate_geolocation(self.args.nr_prediction)
         else:
-            lat = self.args.lat
-            lon = self.args.lon
+            lat, lon = self.args.lat, self.args.lon
 
-        # Run Get Elevation Algorithm
+        # Step 3: Get elevation
         elevation = self.get_elevation(lat, lon)
 
-        if (self.args.api_key):
-            # Download satellite imagery from Google
-            result = self.download_satellite_imagery(self.args.api_key, lat, lon, self.args.area_size_m, self.args.zoom)
+        # Step 4: Ortho images handling
+        if hasattr(self.args, "ortho") and self.args.ortho is not None:
+            # Ortho already provided by user
+            logger.info("--> Using user-provided ortho images")
+            self.move_images_to_subfolder()
+            self.run_deep_image_matching_and_georef(self.base_name)
+            self.apply_transform(elevation)
 
-            if (True):
-                # Moving DIM input images to subfolder
+        elif self.args.api_key:
+            if self.download_satellite_imagery(self.args.api_key, lat, lon, 
+                                            self.args.area_size_m, self.args.zoom):
                 self.move_images_to_subfolder()
-
-                # Run Deep-Image-Matching Algorithm
                 self.run_deep_image_matching_and_georef(self.base_name)
-
-                # Apply 4x4 transformation matrix to the model
                 self.apply_transform(elevation)
-        
         else:
-            logger.info(f"Approximate Location: lat = {lat}, lon = {lon}, elevation = {elevation}")
-            logger.info("--> To refine the location, please provide a valid Google Map Tile API key.")
+            # Fallback: no ortho or API key
+            logger.info(f"Approximate Location: lat={lat}, lon={lon}, elevation={elevation}")
+            logger.info("--> To refine the location, provide a valid Google Maps Tile API key or ortho images.")
 
 
 # ===== Function: main =====
