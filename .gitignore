@@ -1,0 +1,4 @@
+# Ignore Ollama model folder
+ollama_model/
+
+python/__pycache__/
