@@ -1,9 +1,12 @@
-FROM ubuntu:22.04
+# FROM ubuntu:22.04
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 # --- Variables ---
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BLENDER_VERSION=4.4.0
 ENV BLENDER_URL=https://download.blender.org/release/Blender4.4/blender-${BLENDER_VERSION}-linux-x64.tar.xz
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$CUDA_HOME/bin:$PATH
 
 RUN apt-get update && apt-get install -y \
     wget \
@@ -70,7 +73,10 @@ WORKDIR /workspace/dim
 # Checkout the specified branch
 RUN git checkout dev
 
-RUN sed -i '30,31s/^# *//' /workspace/dim/demo.py
+# RUN sed -i '30,31s/^# *//' /workspace/dim/demo.py
+RUN sed -i 's|# from deep_image_matching.parser import parse_cli|from deep_image_matching.parser import parse_cli|' /workspace/dim/demo.py
+RUN sed -i 's|# args = parse_cli()|args = parse_cli()|' /workspace/dim/demo.py
+
 
 # RUN sed -i 's/torch.load(\(.*\)map_location=self._device)/torch.load(\1map_location=self._device, weights_only=False)/' /workspace/dim/src/deep_image_matching/matchers/se2loftr.py
 # RUN sed -i "s|fr'{input_dir}\\\\features.h5'|os.path.join(input_dir, 'features.h5')|g" /workspace/dim/src/deep_image_matching/utils/loftr_roma_to_multiview.py
@@ -91,6 +97,12 @@ RUN rm -rf /var/lib/apt/lists/*
 RUN pip3 install trimesh
 
 RUN pip3 install enlighten
+# RUN pip3 install mercantile
+
+# install Ollama
+RUN pip3 install ollama
+
+ENV OLLAMA_HOST=http://ollama:11434
 
 # --- Working directory ---
 WORKDIR /app

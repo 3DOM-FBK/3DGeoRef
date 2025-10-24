@@ -1,0 +1,28 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_model:/root/.ollama  # persistenza dei modelli
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command: |                    
+      ollama pull llama3.2-vision 
+      wait -n 
+
+  python_app:
+    # image: 3dgeoref-python_app
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: 3dgeoref_python
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    volumes:
+      - ./python/ollama_geoloc.py:/app/ollama_geoloc.py
+      - /mnt/d/OneDrive/OneDrive - Fondazione Bruno Kessler/3DOM/2025/3DBigDataSpace/georef_data/output/debug:/data
+    restart: "no"

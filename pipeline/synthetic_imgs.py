@@ -129,6 +129,49 @@ def get_combined_bounding_box(objects):
     return center, size, bbox_max, bbox_min
 
 
+def auto_adjust_camera_clipping(camera_obj, margin=0.1):
+    """
+    Automatically calculates and sets clip_start and clip_end
+    based on the distance of visible objects from the camera.
+
+    Args:
+        camera_obj (bpy.types.Object): The camera to adjust.
+        margin (float): Additional percentage margin (e.g., 0.1 = 10%).
+    """
+    meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
+    if not meshes:
+        print("⚠️ Nessuna mesh trovata nella scena.")
+        return
+
+    cam_loc = camera_obj.matrix_world.translation
+    cam_forward = camera_obj.matrix_world.to_quaternion() @ mathutils.Vector((0.0, 0.0, -1.0))
+
+    min_dist = float('inf')
+    max_dist = 0.0
+
+    for obj in meshes:
+        world_verts = [obj.matrix_world @ mathutils.Vector(corner) for corner in obj.bound_box]
+
+        for v in world_verts:
+            vec = v - cam_loc
+            dist_along_view = vec.dot(cam_forward)
+
+            if dist_along_view > 0:
+                min_dist = min(min_dist, dist_along_view)
+                max_dist = max(max_dist, dist_along_view)
+
+    if min_dist == float('inf'):
+        min_dist = 0.1
+    else:
+        min_dist = max(0.01, min_dist * (1 - margin))
+    max_dist = max_dist * (1 + margin)
+
+    camera_obj.data.clip_start = min_dist
+    camera_obj.data.clip_end = max_dist
+
+    print (f"Camera clipping adjusted: start={min_dist:.4f}, end={max_dist:.4f}")
+
+
 # ===== Function: render_top_ortho_view_from_meshes =====
 def render_top_ortho_view_from_meshes(output_path, margin=1, pixel_density=100, min_res=512, max_res=2048):
     """
@@ -185,6 +228,9 @@ def render_top_ortho_view_from_meshes(output_path, margin=1, pixel_density=100, 
     cam = bpy.data.objects.new("OrthoCam", cam_data)
     bpy.context.scene.collection.objects.link(cam)
 
+    cam_data.clip_start = 0.01
+    cam_data.clip_end = 10000.0
+
     cam.location = center + mathutils.Vector((0, 0, 10))
     cam.rotation_euler = (0, 0, 0)
     bpy.context.scene.camera = cam
@@ -213,25 +259,89 @@ def compute_camera_distance(fov_deg, obj_height, margin=1.2):
 
 
 # ===== Function: render_street_views_from_meshes =====
-def render_street_views_from_meshes(output_dir, views=5, fov_deg=50.0, margin=1.2):
+# def render_street_views_from_meshes(output_dir, views=5, fov_deg=50.0, margin=1.2):
+#     """
+#     Generates perspective "street view" renders around the meshes in the current Blender scene.
+
+#     - Computes the combined bounding box of all meshes to get the center and overall dimensions.
+#     - Applies a zoom factor if the model is very elongated (to keep proportions consistent in the render).
+#     - Estimates the optimal camera distance based on the field of view (`fov_deg`), model size, and margin (`margin`).
+#     - Creates a perspective camera and positions it at multiple evenly spaced angles around the model.
+#     - For each position, orients the camera toward the model’s center and saves a PNG render.
+
+#     Args:
+#         output_dir (str): Directory where the renders will be saved.
+#         views (int, optional): Number of camera views to generate around the model. Default = 5.
+#         fov_deg (float, optional): Camera field of view in degrees. Default = 50.0.
+#         margin (float, optional): Safety margin around the model to avoid cropping. Default = 1.2.
+
+#     Returns:
+#         None
+#     """
+#     scene = bpy.context.scene
+#     meshes = [obj for obj in scene.objects if obj.type == 'MESH']
+#     if not meshes:
+#         return
+
+#     center, size, _ , _ = get_combined_bounding_box(meshes)
+#     width, depth, height = size.x, size.y, size.z
+
+#     width_ratio = width / height if height > 0 else 1
+#     depth_ratio = depth / height if height > 0 else 1
+#     max_ratio = max(width_ratio, depth_ratio)
+
+#     zoom_factor = 1.0
+#     if max_ratio > 5:
+#         zoom_factor = 0.4
+#     elif max_ratio > 3:
+#         zoom_factor = 0.6
+#     elif max_ratio > 2:
+#         zoom_factor = 0.8
+
+#     target_size = max(width, depth)
+#     distance = compute_camera_distance(fov_deg, target_size, margin=margin) * zoom_factor
+
+#     cam_data = bpy.data.cameras.new("StreetCam")
+#     cam_data.type = 'PERSP'
+#     cam_data.lens_unit = 'FOV'
+#     cam_data.angle = math.radians(fov_deg)
+
+#     cam = bpy.data.objects.new("StreetCam", cam_data)
+#     scene.collection.objects.link(cam)
+#     scene.camera = cam
+#     scene.render.image_settings.file_format = 'PNG'
+
+#     for i in range(views):
+#         angle = i * (2 * math.pi / views)
+#         x = center.x + distance * math.cos(angle)
+#         y = center.y + distance * math.sin(angle)
+#         z = center.z + height * 0.5
+
+#         cam.location = (x, y, z)
+#         direction = center - cam.location
+#         cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+
+#         output_path = os.path.join(output_dir, f"render_{i}.png")
+#         scene.render.filepath = output_path
+#         bpy.ops.render.render(write_still=True)
+
+def render_street_views_from_meshes(output_dir, views=5, fov_deg=50.0, margin=1.2, altitudes=None):
     """
-    Generates perspective "street view" renders around the meshes in the current Blender scene.
-
-    - Computes the combined bounding box of all meshes to get the center and overall dimensions.
-    - Applies a zoom factor if the model is very elongated (to keep proportions consistent in the render).
-    - Estimates the optimal camera distance based on the field of view (`fov_deg`), model size, and margin (`margin`).
-    - Creates a perspective camera and positions it at multiple evenly spaced angles around the model.
-    - For each position, orients the camera toward the model’s center and saves a PNG render.
-
+    Generates perspective "street view" renders around the meshes in the current Blender scene
+    from multiple camera heights.
+    
     Args:
         output_dir (str): Directory where the renders will be saved.
         views (int, optional): Number of camera views to generate around the model. Default = 5.
         fov_deg (float, optional): Camera field of view in degrees. Default = 50.0.
         margin (float, optional): Safety margin around the model to avoid cropping. Default = 1.2.
-
-    Returns:
-        None
+        altitudes (list[float], optional): List of relative heights (fractions of model height).
+                                           Example [0.2, 0.5, 1.0] → 20%, 50% e 100% dell’altezza modello.
+                                           If None, defaults to [0.5].
     """
+    import bpy, math, os
+    from mathutils import Vector
+
     scene = bpy.context.scene
     meshes = [obj for obj in scene.objects if obj.type == 'MESH']
     if not meshes:
@@ -265,19 +375,28 @@ def render_street_views_from_meshes(output_dir, views=5, fov_deg=50.0, margin=1.
     scene.camera = cam
     scene.render.image_settings.file_format = 'PNG'
 
-    for i in range(views):
-        angle = i * (2 * math.pi / views)
-        x = center.x + distance * math.cos(angle)
-        y = center.y + distance * math.sin(angle)
-        z = center.z + height * 0.5
+    cam_data.clip_start = 0.01
+    cam_data.clip_end = 10000.0
 
-        cam.location = (x, y, z)
-        direction = center - cam.location
-        cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+    if altitudes is None:
+        altitudes = [0.5]
 
-        output_path = os.path.join(output_dir, f"render_{i}.png")
-        scene.render.filepath = output_path
-        bpy.ops.render.render(write_still=True)
+    for h_idx, h_factor in enumerate(altitudes):
+        z_cam = center.z + height * h_factor
+
+        for i in range(views):
+            angle = i * (2 * math.pi / views)
+            x = center.x + distance * math.cos(angle)
+            y = center.y + distance * math.sin(angle)
+            z = z_cam
+
+            cam.location = (x, y, z)
+            direction = center - cam.location
+            cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+
+            output_path = os.path.join(output_dir, f"render_h{h_idx}_view{i}.png")
+            scene.render.filepath = output_path
+            bpy.ops.render.render(write_still=True)
 
 
 # ===== Function: remove_cameras =====
@@ -456,11 +575,11 @@ def get_ortho_camera_corners():
 
 def apply_transformations(obj):
     """
-    Applica le trasformazioni attive (location, rotation, scale)
-    all'oggetto specificato in Blender.
+    Applies the active transformations (location, rotation, scale)
+    to the specified object in Blender.
 
     Args:
-        obj (bpy.types.Object): L'oggetto a cui applicare le trasformazioni.
+        obj (bpy.types.Object): The object to which the transformations will be applied.
     """
     # Imposta l'oggetto come attivo
     bpy.context.view_layer.objects.active = obj
@@ -471,6 +590,32 @@ def apply_transformations(obj):
 
     # Deseleziona l'oggetto
     obj.select_set(False)
+
+
+def check_point_cloud(obj):
+    """
+    Check if the given object is a point cloud (vertices without faces).
+    If it is a point cloud, ensure it is visible in renders.
+
+    Args:
+        obj (bpy.types.Object): The object to check.
+    
+    Returns:
+        bool: True if it's a point cloud, False otherwise.
+    """
+    if obj.type != 'MESH':
+        return False
+    
+    mesh = obj.data
+    is_point_cloud = len(mesh.polygons) == 0 and len(mesh.vertices) > 0
+
+    if is_point_cloud:
+        # Ensure object is visible in renders
+        obj.hide_render = False
+        
+        # Optional: make points visible with small spheres (via geometry nodes or dupli verts)
+        # For a quick visualization, you can enable 'Point Cloud' in viewport
+        obj.display_type = 'WIRE'  # or 'BOUNDS', 'SOLID'
 
 
 # ===== Function: main =====
@@ -488,6 +633,10 @@ if __name__ == "__main__":
     setup_hdri_lighting(HDRI_PATH)
 
     obj = import_model(input_file)
+
+    # Controlla se l'oggetto importato è una nuvola di punti - to do...
+    check_point_cloud(obj)
+
     apply_transformations(obj)
     res_x, res_y = render_top_ortho_view_from_meshes(os.path.join(output_folder, 'top_view'))
 
@@ -495,7 +644,7 @@ if __name__ == "__main__":
 
     remove_cameras()
 
-    render_street_views_from_meshes(output_folder, views=nr_view)
+    render_street_views_from_meshes(output_folder, views=nr_view, altitudes=[1.0,2.0])
 
     remove_cameras()
 
