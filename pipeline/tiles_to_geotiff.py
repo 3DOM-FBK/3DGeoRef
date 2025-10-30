@@ -14,20 +14,6 @@ import time
 import sys
 
 
-# ===== Function: parse_args =====
-# def parse_args():
-#     parser = argparse.ArgumentParser(description="Download satellite tiles from Google Maps and generate a georeferenced GeoTIFF.")
-
-#     parser.add_argument("--api_key", required=True, help="Google Cloud Platform API key.")
-#     parser.add_argument("--center_lat", type=float, required=True, help="Latitude of the center of the area.")
-#     parser.add_argument("--center_lon", type=float, required=True, help="Longitude of the center of the area.")
-#     parser.add_argument("--area_size_m", type=float, required=True, help="Side length of the square area to download (in meters).")
-#     parser.add_argument("--zoom", type=int, required=True, help="Zoom level (e.g., 18 or 20).")
-#     parser.add_argument("-o", "--output_folder", required=True, help="Folder to save the downloaded tiles and the final GeoTIFF.")
-
-#     return parser.parse_args()
-
-
 class satelliteTileDownloader():
     def __init__(self, center_lat, center_lon, area_size_m, zoom, output_folder):
         self.api_key = os.environ["MAPBOX_API_KEY"]
@@ -293,7 +279,7 @@ class satelliteTileDownloader():
                 break
 
         if not success:
-            sys.exit(1)
+            return False
 
         base_name = os.path.basename(os.path.normpath(self.output_folder))
         out_path = os.path.join(self.output_folder, f"{base_name}.tif")
@@ -306,3 +292,5 @@ class satelliteTileDownloader():
             min_x=min_x,
             min_y=min_y
         )
+
+        return True

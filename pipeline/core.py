@@ -7,6 +7,8 @@ import numpy as np
 import logging
 import requests
 import json
+from PIL import Image
+from pyproj import Transformer
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
@@ -220,8 +222,50 @@ class PipelineProcessor:
 
             downloader = satelliteTileDownloader(lat, lon, area_size_m, zoom, self.working_dir)
 
-            downloader.run_pipeline()
+            result = downloader.run_pipeline()
+            return result
 
+
+    # ===== Function: rotate_image =====
+    def rotate_image(self, file_path):
+        """
+        Rotates an image at the specified file path by 90, 180, and
+        270 degrees clockwise and saves the rotated images with
+        appropriate suffixes in the same directory.
+        Args:
+            file_path (str): Path to the image file to be rotated.
+        """
+        img = Image.open(file_path)
+        
+        folder, filename = os.path.split(file_path)
+        name, ext = os.path.splitext(filename)
+        
+        angles = [90, 180, 270]
+        
+        for angle in angles:
+            rotated_img = img.rotate(-angle, expand=True)  # negative for clockwise rotation
+            output_path = os.path.join(folder, f"{name}_rot{angle}{ext}")
+            rotated_img.save(output_path)
+
+
+    def create_scaled_versions(self, image_path):
+        """
+        Creates scaled versions of the input image at 25%, 50%, and 75% of the original size.
+        Args:
+            image_path (str): Path to the input image file.
+        """
+        img = Image.open(image_path)
+        base_dir, filename = os.path.split(image_path)
+        name, ext = os.path.splitext(filename)
+
+        scales = [(0.25, "_s_0_25"), (0.5, "_s_0_50"), (0.75, "_s_0_75")]
+
+        for scale, suffix in scales:
+            new_size = (int(img.width * scale), int(img.height * scale))
+            resized = img.resize(new_size, Image.Resampling.LANCZOS)
+            new_filename = os.path.join(base_dir, f"{name}{suffix}{ext}")
+            resized.save(new_filename, format="TIFF")
+    
 
     # ===== Function: run_deep_image_matching_and_georef =====
     def run_deep_image_matching_and_georef(self, base_name):
@@ -238,6 +282,15 @@ class PipelineProcessor:
         """
         logger.info("🔧 Run Deep-Image-Matching Algorithm...")
 
+        ortho_path = os.path.join(self.working_dir, "images", base_name + ".tif")
+        render_path = os.path.join(self.working_dir, "images", "top_view.png")
+        output_path = os.path.join(self.working_dir, "transformation.txt")
+        database_path = os.path.join(self.working_dir, "results_loftr_bruteforce_quality_medium", "database.db")
+
+        self.rotate_image(render_path)
+        self.create_scaled_versions(ortho_path)
+
+        # First command: Deep Image Matching
         dim_cmd_1 = [
             "python3", "demo.py",
             # "-p", "se2loftr",
@@ -252,22 +305,9 @@ class PipelineProcessor:
         ]
         subprocess.run(dim_cmd_1, capture_output=True, text=True, cwd="/workspace/dim")
 
-        ortho_path = os.path.join(self.working_dir, "images", base_name + ".tif")
-        render_path = os.path.join(self.working_dir, "images", "top_view.png")
-        output_path = os.path.join(self.working_dir, "transformation.txt")
-        database_path = os.path.join(self.working_dir, "results_se2loftr_bruteforce_quality_medium", "database.db")
-
-        processor = georef_dim()
-        processor.run_pipeline(ortho_path, render_path, output_path, database_path)
-
-        # dim_cmd_2 = [
-        #     "python3", "/app/pipeline/georef.py",
-        #     "--ortho", os.path.join(self.working_dir, "images", base_name + ".tif"),
-        #     "--render", os.path.join(self.working_dir, "images", "top_view.png"),
-        #     "--output", os.path.join(self.working_dir, "transformation.txt"),
-        #     "--database", os.path.join(self.working_dir, "results_se2loftr_bruteforce_quality_medium", "database.db")
-        # ]
-        # subprocess.run(dim_cmd_2, capture_output=True, text=True)
+        # Second command: Deep Image Matching
+        processor = georef_dim(ortho_path, render_path, output_path, database_path)
+        processor.run_pipeline()
 
 
     # ===== Function: move_images_to_subfolder =====
@@ -419,25 +459,18 @@ class PipelineProcessor:
         }
 
 
-    # ===== Function: align_min_z_to_elevation =====
-    def align_min_z_to_elevation(self, model, elevation):
+    # ===== Function: align_z_to_elevation =====
+    def align_z_to_elevation(self, model, elevation, mid_point):
         """
-        Aligns the lowest point of a 3D model to a specified elevation. Supports both trimesh.Scene and
-        individual trimesh.Trimesh objects by translating the model along the Y-axis.
-
+        Aligns the Z-coordinate of a 3D model to a specified elevation by translating it vertically.
         Args:
-            model (trimesh.Trimesh or trimesh.Scene): The 3D model to align.
-            elevation (float): The target elevation to align the model's minimum Y coordinate.
-
+            model (trimesh.Scene or trimesh.Trimesh): The 3D model to be aligned.
+            elevation (float): The target elevation to align the model's Z-coordinate to.
+            mid_point (numpy.ndarray): A point on the model used to determine the current Z-coordinate.
         Returns:
-            trimesh.Trimesh or trimesh.Scene: The transformed model with its minimum Y aligned to the elevation.
+            trimesh.Scene or trimesh.Trimesh: The transformed 3D model with adjusted Z-coordinate.
         """
-        if isinstance(model, trimesh.Scene):
-            min_z = min([geom.bounds[0,2] for geom in model.geometry.values()])
-        else:
-            min_z = model.bounds[0,2]
-
-        dz = elevation - (min_z)
+        dz = elevation - (mid_point[2])
         T = trimesh.transformations.translation_matrix([0,0,dz])
 
         if isinstance(model, trimesh.Scene):
@@ -450,7 +483,7 @@ class PipelineProcessor:
 
 
     # ===== Function: apply_transform =====
-    def apply_transform(self, elevation):
+    def apply_transform(self):
         """
         Applies a transformation to a 3D model using a 4x4 matrix, aligning it to the correct
         position, orientation, and scale, and then adjusts its elevation. The function supports
@@ -462,10 +495,8 @@ class PipelineProcessor:
             3. Decomposes the transformation matrix to extract rotation, translation, and scale.
             4. Constructs and applies rotation, translation, and scale matrices.
             5. Aligns the model's minimum Z value to the given elevation.
-            6. Exports the transformed model as an `.obj` file.
-
-        Args:
-            elevation (float): The target elevation to which the model should be aligned.
+            6. Calculates the elevation at the model's location.
+            7. Exports the transformed model as an `.obj` file.
 
         Returns:
             None
@@ -503,21 +534,41 @@ class PipelineProcessor:
 
         # --- Scale Matrix ---
         S = np.eye(4)
-        S[0,0] = scale_factors[0]
-        S[1,1] = scale_factors[1]
-        S[2,2] = np.mean([scale_factors[0], scale_factors[1]])
+        mean_scale_factor = np.mean([scale_factors[0], scale_factors[1]])
+        S[0,0] = mean_scale_factor
+        S[1,1] = mean_scale_factor
+        S[2,2] = mean_scale_factor
 
         transform = T @ R @ S
 
-        # Apply transformation
+        # --- Apply transformation ---
         if isinstance(model, trimesh.Scene):
             for geom in model.geometry.values():
                 geom.apply_transform(transform)
         else:
             model.apply_transform(transform)
         
-        # Apply elevation
-        model = self.align_min_z_to_elevation(model, elevation)
+        # --- Get elevation ---
+        if isinstance(model, trimesh.Scene):
+            points_list = []
+            for geom in model.geometry.values():
+                pts, _ = geom.sample(10000, return_index=True)
+                points_list.append(pts)
+            points = np.vstack(points_list)
+        else:
+            points, _ = model.sample(10000, return_index=True)
+
+        centroid = model.bounds.mean(axis=0) if isinstance(model, trimesh.Scene) else model.center_mass
+        distances = np.linalg.norm(points - centroid, axis=1)
+        mid_point = points[np.argmin(distances)]
+
+        transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+        s_lon, s_lat = transformer.transform(mid_point[0], mid_point[1])
+
+        elevation = self.get_elevation(s_lat, s_lon)
+        logger.info(f"Elevation at location: {elevation}m")
+
+        self.align_z_to_elevation(model, elevation, mid_point)
         
         # Export model
         out_path = os.path.join(self.args.output_folder, self.base_name)
@@ -529,34 +580,61 @@ class PipelineProcessor:
 
     # ===== Function: run_pipeline =====
     def run_pipeline(self):
+        """
+        Run the full pipeline:
+        1. Generate synthetic views
+        2. Estimate geolocation
+        3. Get elevation
+        4. Handle ortho/satellite images and apply transforms
+        """
+
         logger.info("Start Pipeline")
-        mode = getattr(self.args, "mode", "auto")  # default: auto
 
+        # Get mode (default: auto)
+        mode = getattr(self.args, "mode", "auto")
+
+        # Load API keys from environment
+        mapbox_key = os.getenv("MAPBOX_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY")
+
+        if not mapbox_key:
+            logger.warning("MAPBOX_API_KEY not found in environment variables. Some steps may fail.")
+        if not gemini_key:
+            logger.warning("GEMINI_API_KEY not found in environment variables. Gemini geolocation may not work.")
+
+        # --------------------------
         # Step 1: Synthetic views
+        # --------------------------
         if mode in ("auto", "geoloc", "dim"):
-            self.generate_synthetic_views(input_file=self.args.input_file, streetviews=3) 
+            self.generate_synthetic_views(
+                input_file=self.args.input_file,
+                streetviews=3
+            )
 
-        sys.exit()
-
+        # --------------------------
         # Step 2: Geolocation
+        # --------------------------
         lat, lon = None, None
         if mode in ("auto", "geoloc"):
-            if self.args.lat is None or self.args.lon is None:
-                # Select the geolocation method based on the chosen model
-                if self.args.geoloc_model.lower() == "geoclip":
-                    lat, lon = self.estimate_geoloc_geoclip(self.args.nr_prediction)
-                elif self.args.geoloc_model.lower() == "ollama":
-                    lat, lon = self.estimate_geoloc_ollama(self.args.nr_prediction)
-                else:  # Default: Gemini
-                    lat, lon = self.estimate_geoloc_geminiAI(self.args.nr_prediction)
-            else:
+            if self.args.lat is not None and self.args.lon is not None:
                 lat, lon = self.args.lat, self.args.lon
-
+                logger.info(f"Using provided Location: lat={lat}, lon={lon}")
+            else:
+                geoloc_model = getattr(self.args, "geoloc_model", "gemini").lower()
+                logger.info(f"Estimating location using {geoloc_model} model")
+                
+                if geoloc_model == "geoclip":
+                    lat, lon = self.estimate_geoloc_geoclip(self.args.nr_prediction)
+                elif geoloc_model == "ollama":
+                    lat, lon = self.estimate_geoloc_ollama(self.args.nr_prediction)
+                else:
+                    # Default: Gemini
+                    lat, lon = self.estimate_geoloc_geminiAI(self.args.nr_prediction)
+            
             logger.info(f"Estimated Location: lat={lat}, lon={lon}")
 
             if mode == "geoloc":
-                return (lat, lon)
-            
+                return lat, lon
 
         elif mode == "dim":
             if self.args.lat is None or self.args.lon is None:
@@ -565,25 +643,42 @@ class PipelineProcessor:
             lat, lon = self.args.lat, self.args.lon
             logger.info(f"Using provided Location: lat={lat}, lon={lon}")
 
-        # Step 3: Get elevation
+        # --------------------------
+        # Step 3: Elevation
+        # --------------------------
         elevation = self.get_elevation(lat, lon)
+        logger.info(f"Orto Elevation at location: {elevation}m")
 
-        # Step 4: Ortho images handling
-        if hasattr(self.args, "ortho") and self.args.ortho is not None:
-            # Ortho already provided by user
+        # --------------------------
+        # Step 4: Ortho / Satellite imagery
+        # --------------------------
+        ortho_provided = getattr(self.args, "ortho", None)
+
+        if ortho_provided:
             logger.info("--> Using user-provided ortho images")
-            self.move_images_to_subfolder(self.args.ortho)
+            self.move_images_to_subfolder(ortho_provided)
             self.run_deep_image_matching_and_georef(self.base_name)
-            self.apply_transform(elevation)
+            self.apply_transform()
 
-        elif self.args.api_key:
+        elif mapbox_key:
+            logger.info("--> Downloading satellite imagery using MAPBOX API")
             if self.download_satellite_imagery(lat, lon, self.args.area_size_m, self.args.zoom):
                 self.move_images_to_subfolder()
                 self.run_deep_image_matching_and_georef(self.base_name)
-                self.apply_transform(elevation)
+                self.apply_transform()
+            else:
+                logger.warning("Failed to download satellite imagery.")
+
         else:
             # Fallback: no ortho or API key
             logger.info(f"Approximate Location: lat={lat}, lon={lon}, elevation={elevation}")
-            logger.info("--> To refine the location, provide a valid API key or ortho images.")
+            logger.info("--> To refine the location, provide a valid MAPBOX API key or ortho images.")
+        
 
-        return (lat, lon, elevation)
+        # Copy temporary data to output folder
+        out_path = os.path.join(self.args.output_folder, self.base_name, "tmp")
+        out_path_1 = os.path.join(self.args.output_folder, self.base_name, self.base_name+".tif")
+        os.makedirs(out_path, exist_ok=True)
+
+        shutil.copytree(self.working_dir, out_path, dirs_exist_ok=True)
+        shutil.copy(os.path.join(self.working_dir, "images", self.base_name+".tif"), out_path_1)
