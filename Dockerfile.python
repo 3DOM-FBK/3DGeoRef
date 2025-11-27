@@ -40,17 +40,14 @@ RUN wget https://download.blender.org/release/Blender4.4/blender-${BLENDER_VERSI
 
 # --- Python packages ---
 RUN pip3 install --upgrade pip
-RUN pip3 install numpy Pillow rasterio
-
-# --- GeoCLIP installation ---
-RUN pip3 install geoclip pyproj
+RUN pip3 install numpy Pillow rasterio geoclip pyproj google-genai
 
 RUN apt update && apt install -y \
     **libxkbcommon0** \
     **libsm6**
 
 # --- Deep Image Matching ---
-RUN pip3 install pycolmap
+RUN pip3 install pycolmap==3.12.6
 
 RUN apt update && apt install -y \
     libglib2.0-0
@@ -94,7 +91,7 @@ RUN pip3 install -e .
 RUN rm -rf /var/lib/apt/lists/*
 
 # install trimesh
-RUN pip3 install trimesh
+RUN pip3 install trimesh open3d
 
 RUN pip3 install enlighten
 # RUN pip3 install mercantile

@@ -5,8 +5,6 @@ import shutil
 import trimesh
 import numpy as np
 import logging
-import requests
-import json
 from PIL import Image
 from pyproj import Transformer
 
@@ -17,6 +15,8 @@ from geoloc_ollama import ImageToCoordinates
 from geoloc_geminiAI import GeminiGeolocator
 from tiles_to_geotiff import satelliteTileDownloader
 from georef_dim import georef_dim
+from georef_utils import GeoTransformer
+
 
 
 # ===== Logger configuration =====
@@ -334,129 +334,6 @@ class PipelineProcessor:
         
         if ortho_map:
             shutil.copy(ortho_map, os.path.join(images_dir, os.path.basename(ortho_map)))
-    
-
-    # ===== Function: load_matrix_4x4 =====
-    def load_matrix_4x4(self, file_path):
-        """
-        Loads a 4x4 matrix from a text file and verifies its shape.
-
-        Args:
-            file_path (str): Path to the text file containing the matrix.
-
-        Returns:
-            numpy.ndarray: The loaded 4x4 matrix.
-
-        Raises:
-            ValueError: If the matrix read from the file is not 4x4.
-        """
-        matrix = np.loadtxt(file_path, delimiter=None)
-        if matrix.shape != (4, 4):
-            raise ValueError(f"Matrix must be 4x4, found {matrix.shape}")
-        return matrix
-
-
-    # ===== Function: load_json =====
-    def load_json(self, file_path):
-        """
-        Loads and parses a JSON file.
-
-        Args:
-            file_path (str): Path to the JSON file to be loaded.
-
-        Returns:
-            dict or list: The parsed JSON data.
-        """
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data
-
-
-    # ===== Function: get_elevation =====
-    def get_elevation(self, lat, lon, dataset="srtm30m"):
-        """
-        Fetches the elevation value for a given latitude and longitude from the OpenTopodata API.
-
-        Args:
-            lat (float): Latitude of the location.
-            lon (float): Longitude of the location.
-            dataset (str, optional): Elevation dataset to query (default is "srtm30m").
-
-        Returns:
-            float: Elevation in meters if available, otherwise 0.
-        """
-        logger.info("🔧 Get Elevation...")
-        url = f"https://api.opentopodata.org/v1/{dataset}?locations={lat},{lon}"
-        
-        try:
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            
-            if "results" in data and len(data["results"]) > 0:
-                return data["results"][0].get("elevation", 0)
-            else:
-                return 0
-        except Exception as e:
-            return 0
-
-
-    # ===== Function: blender_to_trimesh_transform =====
-    def blender_to_trimesh_transform(self):
-        """
-        Creates a transformation matrix to convert coordinates from Blender's coordinate system
-        to Trimesh's coordinate system. The transformation includes a -90 degree rotation around
-        the X-axis and axis inversions for Y and Z.
-
-        Returns:
-            numpy.ndarray: A 4x4 transformation matrix for converting Blender coordinates to Trimesh coordinates.
-        """
-        R = trimesh.transformations.rotation_matrix(np.radians(-90), [1,0,0])
-        M = np.eye(4)
-        M[1,1] = -1
-        M[2,2] = -1
-        return M @ R
-
-
-    # ===== Function: decompose_matrix =====
-    def decompose_matrix(self, M):
-        """
-        Decomposes a 4x4 transformation matrix into its translation, scale, and rotation (in Euler angles).
-
-        Args:
-            M (numpy.ndarray): A 4x4 transformation matrix.
-
-        Returns:
-            dict: A dictionary containing:
-                - "translation" (numpy.ndarray): The translation vector (x, y, z).
-                - "scale" (numpy.ndarray): Scaling factors along each axis.
-                - "euler_deg" (tuple): Rotation angles in degrees as Euler angles (sxyz convention).
-                If the decomposition fails, returns ("n/a",).
-        """
-        M = np.asarray(M, dtype=float)
-        assert M.shape == (4,4)
-
-        R = M[:3, :3].copy()
-        t = M[:3, 3].copy()
-
-        scale = np.linalg.norm(R, axis=0)
-        safe_scale = np.where(scale == 0, 1.0, scale)
-        Rn = R / safe_scale
-
-        rot4 = np.eye(4)
-        rot4[:3, :3] = Rn
-
-        try:
-            euler = trimesh.transformations.euler_from_matrix(rot4, axes='sxyz')
-            euler_deg = np.degrees(euler)
-        except Exception:
-            euler_deg = ("n/a",)
-
-        return {
-            "translation": t,
-            "scale": scale,
-            "euler_deg": euler_deg
-        }
 
 
     # ===== Function: align_z_to_elevation =====
@@ -480,102 +357,12 @@ class PipelineProcessor:
             model.apply_transform(T)
 
         return model
-
+    
 
     # ===== Function: apply_transform =====
-    def apply_transform(self):
-        """
-        Applies a transformation to a 3D model using a 4x4 matrix, aligning it to the correct
-        position, orientation, and scale, and then adjusts its elevation. The function supports
-        both `trimesh.Scene` and `trimesh.Trimesh` objects.
-
-        Steps:
-            1. Loads the transformation matrix from `transformation.txt`.
-            2. Converts coordinates from Blender to Trimesh convention.
-            3. Decomposes the transformation matrix to extract rotation, translation, and scale.
-            4. Constructs and applies rotation, translation, and scale matrices.
-            5. Aligns the model's minimum Z value to the given elevation.
-            6. Calculates the elevation at the model's location.
-            7. Exports the transformed model as an `.obj` file.
-
-        Returns:
-            None
-        """
-        if not os.path.exists(os.path.join(self.working_dir, "transformation.txt")):
-            logger.error("⚠️  Missing transformation.txt file. Cannot apply transformation.")
-            return
-        logger.info("🔧 Refine Position...")
-        matrix_4x4 = self.load_matrix_4x4(os.path.join(self.working_dir, "transformation.txt"))
-        model = trimesh.load(os.path.join(self.working_dir, self.base_name + "_scaled.glb"))
-
-        # Blender to trimesh conversion
-        T = self.blender_to_trimesh_transform()
-        if isinstance(model, trimesh.Scene):
-            for geom in model.geometry.values():
-                geom.apply_transform(T)
-        else:
-            model.apply_transform(T)
-
-        # Decompose Matrix 4x4 an get values
-        result = self.decompose_matrix(matrix_4x4)
-
-        angle_deg = result["euler_deg"][2]
-        translation = [result["translation"][0], result["translation"][1], 0]
-        scale_factors = [result["scale"][0], result["scale"][1], 1.0]
-
-        # --- Rotation Matrix ---
-        angle_rad = np.radians(angle_deg)
-        axis = [0, 0, 1]
-        R = trimesh.transformations.rotation_matrix(angle_rad, axis)
-
-        # --- Translation Matrix ---
-        T = np.eye(4)
-        T[:3, 3] = translation
-
-        # --- Scale Matrix ---
-        S = np.eye(4)
-        mean_scale_factor = np.mean([scale_factors[0], scale_factors[1]])
-        S[0,0] = mean_scale_factor
-        S[1,1] = mean_scale_factor
-        S[2,2] = mean_scale_factor
-
-        transform = T @ R @ S
-
-        # --- Apply transformation ---
-        if isinstance(model, trimesh.Scene):
-            for geom in model.geometry.values():
-                geom.apply_transform(transform)
-        else:
-            model.apply_transform(transform)
-        
-        # --- Get elevation ---
-        if isinstance(model, trimesh.Scene):
-            points_list = []
-            for geom in model.geometry.values():
-                pts, _ = geom.sample(10000, return_index=True)
-                points_list.append(pts)
-            points = np.vstack(points_list)
-        else:
-            points, _ = model.sample(10000, return_index=True)
-
-        centroid = model.bounds.mean(axis=0) if isinstance(model, trimesh.Scene) else model.center_mass
-        distances = np.linalg.norm(points - centroid, axis=1)
-        mid_point = points[np.argmin(distances)]
-
-        transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
-        s_lon, s_lat = transformer.transform(mid_point[0], mid_point[1])
-
-        elevation = self.get_elevation(s_lat, s_lon)
-        logger.info(f"Elevation at location: {elevation}m")
-
-        self.align_z_to_elevation(model, elevation, mid_point)
-        
-        # Export model
-        out_path = os.path.join(self.args.output_folder, self.base_name)
-        file_path = os.path.join(out_path, self.base_name+"_georef.obj")
-
-        os.makedirs(out_path, exist_ok=True)
-        model.export(file_path, file_type="obj", digits=15, include_texture=False)
+    def apply_transform(self, lat, lon):
+        gt = GeoTransformer(self.working_dir, self.args.input_file, self.args.output_folder, lat, lon)
+        gt.run_GeoTransformer()
 
 
     # ===== Function: run_pipeline =====
@@ -646,7 +433,7 @@ class PipelineProcessor:
         # --------------------------
         # Step 3: Elevation
         # --------------------------
-        elevation = self.get_elevation(lat, lon)
+        elevation = GeoTransformer.get_elevation(lat, lon)
         logger.info(f"Orto Elevation at location: {elevation}m")
 
         # --------------------------
@@ -658,14 +445,14 @@ class PipelineProcessor:
             logger.info("--> Using user-provided ortho images")
             self.move_images_to_subfolder(ortho_provided)
             self.run_deep_image_matching_and_georef(self.base_name)
-            self.apply_transform()
+            self.apply_transform(lat, lon)
 
         elif mapbox_key:
             logger.info("--> Downloading satellite imagery using MAPBOX API")
             if self.download_satellite_imagery(lat, lon, self.args.area_size_m, self.args.zoom):
                 self.move_images_to_subfolder()
                 self.run_deep_image_matching_and_georef(self.base_name)
-                self.apply_transform()
+                self.apply_transform(lat, lon)
             else:
                 logger.warning("Failed to download satellite imagery.")
 
@@ -674,11 +461,3 @@ class PipelineProcessor:
             logger.info(f"Approximate Location: lat={lat}, lon={lon}, elevation={elevation}")
             logger.info("--> To refine the location, provide a valid MAPBOX API key or ortho images.")
         
-
-        # Copy temporary data to output folder
-        out_path = os.path.join(self.args.output_folder, self.base_name, "tmp")
-        out_path_1 = os.path.join(self.args.output_folder, self.base_name, self.base_name+".tif")
-        os.makedirs(out_path, exist_ok=True)
-
-        shutil.copytree(self.working_dir, out_path, dirs_exist_ok=True)
-        shutil.copy(os.path.join(self.working_dir, "images", self.base_name+".tif"), out_path_1)

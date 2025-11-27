@@ -240,8 +240,8 @@ def render_top_ortho_view_from_meshes(output_path, margin=1, pixel_density=100, 
     render.film_transparent = True
     scene.render.engine = 'CYCLES'
     scene.cycles.device = 'GPU'
-    scene.cycles.samples = 32
-    scene.cycles.preview_samples = 16
+    scene.cycles.samples = 16
+    scene.cycles.preview_samples = 8
     scene.cycles.use_denoising = True
 
     bpy.ops.render.render(write_still=True)
@@ -259,72 +259,6 @@ def compute_camera_distance(fov_deg, obj_height, margin=1.2):
 
 
 # ===== Function: render_street_views_from_meshes =====
-# def render_street_views_from_meshes(output_dir, views=5, fov_deg=50.0, margin=1.2):
-#     """
-#     Generates perspective "street view" renders around the meshes in the current Blender scene.
-
-#     - Computes the combined bounding box of all meshes to get the center and overall dimensions.
-#     - Applies a zoom factor if the model is very elongated (to keep proportions consistent in the render).
-#     - Estimates the optimal camera distance based on the field of view (`fov_deg`), model size, and margin (`margin`).
-#     - Creates a perspective camera and positions it at multiple evenly spaced angles around the model.
-#     - For each position, orients the camera toward the model’s center and saves a PNG render.
-
-#     Args:
-#         output_dir (str): Directory where the renders will be saved.
-#         views (int, optional): Number of camera views to generate around the model. Default = 5.
-#         fov_deg (float, optional): Camera field of view in degrees. Default = 50.0.
-#         margin (float, optional): Safety margin around the model to avoid cropping. Default = 1.2.
-
-#     Returns:
-#         None
-#     """
-#     scene = bpy.context.scene
-#     meshes = [obj for obj in scene.objects if obj.type == 'MESH']
-#     if not meshes:
-#         return
-
-#     center, size, _ , _ = get_combined_bounding_box(meshes)
-#     width, depth, height = size.x, size.y, size.z
-
-#     width_ratio = width / height if height > 0 else 1
-#     depth_ratio = depth / height if height > 0 else 1
-#     max_ratio = max(width_ratio, depth_ratio)
-
-#     zoom_factor = 1.0
-#     if max_ratio > 5:
-#         zoom_factor = 0.4
-#     elif max_ratio > 3:
-#         zoom_factor = 0.6
-#     elif max_ratio > 2:
-#         zoom_factor = 0.8
-
-#     target_size = max(width, depth)
-#     distance = compute_camera_distance(fov_deg, target_size, margin=margin) * zoom_factor
-
-#     cam_data = bpy.data.cameras.new("StreetCam")
-#     cam_data.type = 'PERSP'
-#     cam_data.lens_unit = 'FOV'
-#     cam_data.angle = math.radians(fov_deg)
-
-#     cam = bpy.data.objects.new("StreetCam", cam_data)
-#     scene.collection.objects.link(cam)
-#     scene.camera = cam
-#     scene.render.image_settings.file_format = 'PNG'
-
-#     for i in range(views):
-#         angle = i * (2 * math.pi / views)
-#         x = center.x + distance * math.cos(angle)
-#         y = center.y + distance * math.sin(angle)
-#         z = center.z + height * 0.5
-
-#         cam.location = (x, y, z)
-#         direction = center - cam.location
-#         cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
-
-#         output_path = os.path.join(output_dir, f"render_{i}.png")
-#         scene.render.filepath = output_path
-#         bpy.ops.render.render(write_still=True)
-
 def render_street_views_from_meshes(output_dir, views=5, fov_deg=50.0, margin=1.2, altitudes=None):
     """
     Generates perspective "street view" renders around the meshes in the current Blender scene
@@ -490,7 +424,7 @@ def ortho_camera_corners(cam_obj, scene=None):
 
 
 # ===== Function: postprocess_model =====
-def postprocess_model(output_path, corners_world, target_x):
+def postprocess_model(output_path, filename, corners_world, target_x):
     """
     Post-processes all mesh objects in the Blender scene by translating, scaling, and exporting them.
 
@@ -503,56 +437,55 @@ def postprocess_model(output_path, corners_world, target_x):
         corners_world (list[mathutils.Vector]): World-space coordinates of reference corners for translation.
         target_x (float): Target size along the X-axis after scaling.
     """
+    import mathutils
+    
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
 
     corner = max(corners_world, key=lambda v: (-v.x, v.y))
-    print (corner)
 
-    # Move meshes
-    for obj in meshes:
-        mesh = obj.data
-        
-        bm = bmesh.new()
-        bm.from_mesh(mesh)
-        
-        for v in bm.verts:
-            v.co.x = v.co.x - corner[0]
-            v.co.y = v.co.y - corner[1]
-        
-        bm.to_mesh(mesh)
-        bm.free()
-        
-        mesh.update()
+    # Calculate translation matrix
+    translation_matrix = mathutils.Matrix.Translation((-corner[0], -corner[1], 0))
     
-    # Scale meshes
-    _ , _ , bbox_max, bbox_min = get_combined_bounding_box(meshes)
-    size_x = bbox_max[0] - bbox_min[0]
-    size_y = bbox_max[1] - bbox_min[1]
-    scale_fact = target_x / size_x
+    # Apply translation to all meshes
     for obj in meshes:
-        mesh = obj.data
-        
-        bm = bmesh.new()
-        bm.from_mesh(mesh)
-        
-        for v in bm.verts:
-            v.co *= scale_fact
-        
-        bm.to_mesh(mesh)
-        bm.free()
-        
-        mesh.update()
-
+        obj.data.transform(translation_matrix)
+        obj.data.update()
+    
+    # Calculate scale factor
+    _, _, bbox_max, bbox_min = get_combined_bounding_box(meshes)
+    size_x = bbox_max[0] - bbox_min[0]
+    scale_fact = target_x / size_x
+    
+    # Calculate scale matrix
+    scale_matrix = mathutils.Matrix.Scale(scale_fact, 4)
+    
+    # Apply scale to all meshes
+    for obj in meshes:
+        obj.data.transform(scale_matrix)
+        obj.data.update()
+    
+    # Calculate final transformation matrix (scale after translation)
+    final_matrix = scale_matrix @ translation_matrix
+    
+    # Convert matrix to list for JSON serialization
+    matrix_list = [list(row) for row in final_matrix]
+    
+    # Save matrix to JSON file
+    json_path = os.path.join(output_path, "matrix_blender.json")
+    with open(json_path, 'w') as f:
+        json.dump(matrix_list, f, indent=2)
+    
     # Export GLB
     bpy.ops.object.select_all(action='DESELECT')
     for obj in meshes:
         obj.select_set(True)
     bpy.ops.export_scene.gltf(
-        filepath=output_path,
+        filepath=os.path.join(output_path, filename),
         export_format='GLB',
-        use_selection=True
+        use_selection=True,
+        export_yup=True
     )
-
+    
 
 # ===== Function: get_ortho_camera_corners =====
 def get_ortho_camera_corners():
@@ -618,6 +551,20 @@ def check_point_cloud(obj):
         obj.display_type = 'WIRE'  # or 'BOUNDS', 'SOLID'
 
 
+def get_world_matrix(obj):
+    """
+    Get the world matrix of a Blender mesh object.
+
+    Args:
+        obj (bpy.types.Object): The mesh object.
+    
+    Returns:
+        mathutils.Matrix: The 4x4 world matrix of the object.
+    """
+    matrix = obj.matrix_world.copy()
+    return matrix
+
+
 # ===== Function: main =====
 if __name__ == "__main__":
     args = parse_arguments()
@@ -648,5 +595,5 @@ if __name__ == "__main__":
 
     remove_cameras()
 
-    postprocess_model(os.path.join(output_folder, base_name+"_scaled.glb"), corners_world, res_x)
+    postprocess_model(output_folder, base_name+"_scaled.glb", corners_world, res_x)
     clear_scene()

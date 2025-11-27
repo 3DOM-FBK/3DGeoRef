@@ -1,4 +1,4 @@
-import cv2
+import cv2, os
 import argparse
 import pycolmap
 import numpy as np
@@ -79,6 +79,8 @@ class georef_dim():
         pair = self.SelectPair(db, self.render_path.name, self.ortho_path.name)
         self.render_path = self.render_path.parent / pair[0]
         self.ortho_path = self.ortho_path.parent / pair[1]
+
+        # print(f"Selected pair: '{self.render_path}' and '{self.ortho_path}'")
 
         # Determine rotation and scale from filenames
         rotation = 0
@@ -176,3 +178,15 @@ class georef_dim():
                 with open(f"./transformed_{name}_tiepoints.txt", 'w') as f:
                     for pt in pts:
                         f.write(f"{pt[0]}, {pt[1]}\n")
+
+
+# if __name__ == "__main__":
+#     working_dir = "/tmp/torreEiffel"
+#     base_name = "torreEiffel"
+#     ortho_path = os.path.join(working_dir, "images", base_name + ".tif")
+#     render_path = os.path.join(working_dir, "images", "top_view.png")
+#     output_path = os.path.join(working_dir, "transformation.txt")
+#     database_path = os.path.join(working_dir, "results_loftr_bruteforce_quality_medium", "database.db")
+#     processor = georef_dim(ortho_path, render_path, output_path, database_path)
+
+#     processor.run_pipeline()
