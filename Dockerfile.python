@@ -94,12 +94,14 @@ RUN rm -rf /var/lib/apt/lists/*
 RUN pip3 install trimesh open3d
 
 RUN pip3 install enlighten
-# RUN pip3 install mercantile
+RUN pip3 install pygeodesy
 
 # install Ollama
 RUN pip3 install ollama
 
 ENV OLLAMA_HOST=http://ollama:11434
+
+COPY ./egm2008-1/egm2008-1.pgm /opt/egm2008-1/egm2008-1.pgm
 
 # --- Working directory ---
 WORKDIR /app

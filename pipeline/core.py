@@ -13,9 +13,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 from geoloc_geoclip import GeoClipBatchPredictor
 from geoloc_ollama import ImageToCoordinates
 from geoloc_geminiAI import GeminiGeolocator
-from tiles_to_geotiff import satelliteTileDownloader
+from satellite_imagery_downloader import satelliteTileDownloader
 from georef_dim import georef_dim
-from georef_utils import GeoTransformer
+from georef_utils import GeoTransformer, ElevationService
 
 
 
@@ -88,7 +88,7 @@ class PipelineProcessor:
         # Base command
         blender_cmd = [
             "blender", "-b",
-            "--python", "/app/pipeline/synthetic_imgs.py",
+            "--python", "/app/pipeline/render_multiview.py",
             "--", "--input_file", input_file,
             "--output_folder", self.working_dir
         ]
@@ -362,7 +362,7 @@ class PipelineProcessor:
     # ===== Function: apply_transform =====
     def apply_transform(self, lat, lon):
         gt = GeoTransformer(self.working_dir, self.args.input_file, self.args.output_folder, lat, lon)
-        gt.run_GeoTransformer()
+        gt.run()
 
 
     # ===== Function: run_pipeline =====
@@ -431,9 +431,9 @@ class PipelineProcessor:
             logger.info(f"Using provided Location: lat={lat}, lon={lon}")
 
         # --------------------------
-        # Step 3: Elevation
+        # Step 3: Elevation -- Change...
         # --------------------------
-        elevation = GeoTransformer.get_elevation(lat, lon)
+        elevation = ElevationService.get_elevation(lat, lon)
         logger.info(f"Orto Elevation at location: {elevation}m")
 
         # --------------------------

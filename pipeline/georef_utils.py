@@ -1,36 +1,109 @@
+"""
+GeoTransformer Module
+
+This module provides functionality for georeferencing 3D models by applying
+coordinate transformations, scale corrections, and coordinate system conversions.
+"""
+
 import os
 import sys
+import json
+import logging
+from typing import Tuple, Dict, Optional, Union
+
 import numpy as np
 import trimesh
-from pyproj import Transformer
-import logging
 import requests
-import json
+from pyproj import Transformer
 
 
+# Configure logging
 log_level = os.environ.get("LOGLEVEL", "INFO").upper()
 log_format = '%(asctime)s - %(levelname)-8s - %(message)s'
 logging.basicConfig(
-    level=getattr(logging, log_level), 
+    level=getattr(logging, log_level),
     format=log_format,
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 
-class GeoTransformer:
-    def __init__(self, working_dir, input_file, output_folder, lat, lon):
-        self.working_dir = working_dir
-        self.input_file = input_file
-        self.output_folder = output_folder
-        self.lat = float(lat)
-        self.lon = float(lon)
-        self.basename = self.base_name = os.path.splitext(os.path.basename(input_file))[0]
+class MatrixUtils:
+    """Utility class for 4x4 transformation matrix operations."""
+    
 
     @staticmethod
-    def blender_to_trimesh_transform():
+    def load_matrix(file_path: str) -> np.ndarray:
+        """
+        Load a 4x4 transformation matrix from a text file.
+        
+        Args:
+            file_path: Path to the matrix file
+            
+        Returns:
+            4x4 numpy array
+            
+        Raises:
+            ValueError: If matrix is not 4x4
+            FileNotFoundError: If file doesn't exist
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Matrix file not found: {file_path}")
+        
+        matrix = np.loadtxt(file_path, delimiter=None)
+        
+        if matrix.shape != (4, 4):
+            raise ValueError(f"Matrix must be 4x4, found {matrix.shape}")
+        
+        return matrix
+    
+
+    @staticmethod
+    def decompose(matrix: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Decompose a 4x4 transformation matrix into translation, scale, and rotation.
+        
+        Args:
+            matrix: 4x4 transformation matrix
+            
+        Returns:
+            Dictionary with 'translation', 'scale', and 'euler_deg' keys
+        """
+        matrix = np.asarray(matrix, dtype=float)
+        assert matrix.shape == (4, 4), "Matrix must be 4x4"
+        
+        # Extract translation
+        translation = matrix[:3, 3].copy()
+        
+        # Extract rotation and scale
+        rotation_scale = matrix[:3, :3].copy()
+        scale = np.linalg.norm(rotation_scale, axis=0)
+        
+        # Normalize rotation matrix
+        safe_scale = np.where(scale == 0, 1.0, scale)
+        rotation_normalized = rotation_scale / safe_scale
+        
+        # Convert to 4x4 for euler extraction
+        rotation_4x4 = np.eye(4)
+        rotation_4x4[:3, :3] = rotation_normalized
+        
+        # Extract Euler angles
+        try:
+            euler_rad = trimesh.transformations.euler_from_matrix(rotation_4x4, axes='sxyz')
+            euler_deg = np.degrees(euler_rad)
+        except Exception as e:
+            logger.warning(f"Failed to extract Euler angles: {e}")
+            euler_deg = np.array([0, 0, 0])
+        
+        return {
+            "translation": translation,
+            "scale": scale,
+            "euler_deg": euler_deg
+        }
+
+
+    @staticmethod
+    def blender_to_trimesh_matrix():
         """
         Creates a transformation matrix to convert coordinates from Blender's coordinate system
         to Trimesh's coordinate system. The transformation includes a -90 degree rotation around
@@ -47,339 +120,417 @@ class GeoTransformer:
     
 
     @staticmethod
-    def decompose_matrix(M):
+    def create_trs(translation: np.ndarray, rotation: np.ndarray, scale: Union[float, np.ndarray]) -> np.ndarray:
         """
-        Decomposes a 4x4 transformation matrix into its translation, scale, and rotation (in Euler angles).
-
+        Create a 4x4 transformation matrix from translation, rotation, and scale.
+        
         Args:
-            M (numpy.ndarray): A 4x4 transformation matrix.
-
+            translation: 3D translation vector
+            rotation: Rotation matrix (3x3) or Euler angles (3D vector in radians)
+            scale: Uniform scale factor or 3D scale vector
+            
         Returns:
-            dict: A dictionary containing:
-                - "translation" (numpy.ndarray): The translation vector (x, y, z).
-                - "scale" (numpy.ndarray): Scaling factors along each axis.
-                - "euler_deg" (tuple): Rotation angles in degrees as Euler angles (sxyz convention).
-                If the decomposition fails, returns ("n/a",).
+            4x4 transformation matrix
         """
-        M = np.asarray(M, dtype=float)
-        assert M.shape == (4,4)
+        matrix = np.eye(4)
+        
+        # Apply scale
+        if np.isscalar(scale):
+            matrix[:3, :3] *= scale
+        else:
+            matrix[:3, :3] *= np.diag(scale)
+        
+        # Apply rotation
+        if rotation.shape == (3, 3):
+            matrix[:3, :3] = rotation @ matrix[:3, :3]
+        elif rotation.shape == (3,):
+            # Assume Euler angles
+            rot_matrix = trimesh.transformations.euler_matrix(*rotation, axes='sxyz')
+            matrix[:3, :3] = rot_matrix[:3, :3] @ matrix[:3, :3]
+        
+        # Apply translation
+        matrix[:3, 3] = translation
+        
+        return matrix
 
-        R = M[:3, :3].copy()
-        t = M[:3, 3].copy()
 
-        scale = np.linalg.norm(R, axis=0)
-        safe_scale = np.where(scale == 0, 1.0, scale)
-        Rn = R / safe_scale
-
-        rot4 = np.eye(4)
-        rot4[:3, :3] = Rn
-
-        try:
-            euler = trimesh.transformations.euler_from_matrix(rot4, axes='sxyz')
-            euler_deg = np.degrees(euler)
-        except Exception:
-            euler_deg = ("n/a",)
-
-        return {
-            "translation": t,
-            "scale": scale,
-            "euler_deg": euler_deg
-        }
+class ElevationService:
+    """Service for fetching elevation data from OpenTopoData API."""
     
+    DEFAULT_DATASET = "srtm30m"
+    API_URL = "https://api.opentopodata.org/v1/{dataset}"
 
     @staticmethod
-    def get_elevation(lat, lon, dataset="srtm30m"):
+    def get_elevation(lat: float, lon: float, dataset: str = DEFAULT_DATASET) -> float:
         """
-        Fetches the elevation value for a given latitude and longitude from the OpenTopodata API.
-
+        Fetch elevation for given coordinates.
+        
         Args:
-            lat (float): Latitude of the location.
-            lon (float): Longitude of the location.
-            dataset (str, optional): Elevation dataset to query (default is "srtm30m").
-
+            lat: Latitude in degrees
+            lon: Longitude in degrees
+            dataset: Elevation dataset name
+            
         Returns:
-            float: Elevation in meters if available, otherwise 0.
+            Elevation in meters, or 0 if unavailable
         """
-        logger.info("🔧 Get Elevation...")
-        url = f"https://api.opentopodata.org/v1/{dataset}?locations={lat},{lon}"
-              
+        
+        url = ElevationService.API_URL.format(dataset=dataset)
+        params = {"locations": f"{lat},{lon}"}
+        
         try:
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json()
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
             
             if "results" in data and len(data["results"]) > 0:
-                return data["results"][0].get("elevation", 0)
+                elevation = data["results"][0].get("elevation", 0)
+                return elevation
             else:
+                logger.warning("⚠️ GeoRef_utils.py - No elevation data available")
                 return 0
-        except Exception as e:
+                
+        except requests.RequestException as e:
+            logger.error(f"❌ GeoRef_utils.py - Failed to fetch elevation: {e}")
             return 0
+
+
+class ModelAnalyzer:
+    """Utility class for analyzing 3D model geometry."""
     
+
     @staticmethod
-    def compute_scale_factor_correct(lat):
+    def get_centroid_and_midpoint(model: Union[trimesh.Scene, trimesh.Trimesh], 
+                                   num_samples: int = 10000) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Computes the scale factor (K) for the Web Mercator projection.
-
-        Args:
-            lat (float): The latitude in degrees.
-
-        Returns:
-            float: The scale factor K.
-        """
-        # 1. Convert latitude from degrees to radians
-        lat_rad = np.radians(lat)
+        Calculate the centroid and midpoint of a 3D model.
         
-        # 2. Calculate K = 1 / cos(phi)
-        # This factor K is the distortion (how many times is the map stretched)
-        scale_factor_K = 1.0 / np.cos(lat_rad)
+        The centroid is the geometric center of the bounding box.
+        The midpoint is the sampled point closest to the centroid.
         
-        return scale_factor_K
-    
-
-    @staticmethod
-    def load_matrix_4x4(file_path):
-        """
-        Loads a 4x4 matrix from a text file and verifies its shape.
-
         Args:
-            file_path (str): Path to the text file containing the matrix.
-
+            model: 3D model (Scene or Trimesh)
+            num_samples: Number of points to sample
+            
         Returns:
-            numpy.ndarray: The loaded 4x4 matrix.
-
-        Raises:
-            ValueError: If the matrix read from the file is not 4x4.
+            Tuple of (midpoint, centroid)
         """
-        matrix = np.loadtxt(file_path, delimiter=None)
-        if matrix.shape != (4, 4):
-            raise ValueError(f"Matrix must be 4x4, found {matrix.shape}")
-        return matrix
-    
-
-    @staticmethod
-    def get_mid_point(model):
-        """
-        Computes the midpoint of a 3D model.
-
-        Args:
-            model (trimesh.Scene or trimesh.Trimesh): The 3D model.
-
-        Returns:
-            numpy.ndarray: The midpoint of the model.
-        """
+        # Sample points from model
         if isinstance(model, trimesh.Scene):
             points_list = []
             for geom in model.geometry.values():
-                pts, _ = geom.sample(10000, return_index=True)
+                pts, _ = geom.sample(num_samples, return_index=True)
                 points_list.append(pts)
             points = np.vstack(points_list)
+            centroid = model.bounds.mean(axis=0)
         else:
-            points, _ = model.sample(10000, return_index=True)
-
-        centroid = model.bounds.mean(axis=0) if isinstance(model, trimesh.Scene) else model.center_mass
+            points, _ = model.sample(num_samples, return_index=True)
+            centroid = model.center_mass
+        
+        # Find point closest to centroid
         distances = np.linalg.norm(points - centroid, axis=1)
-        mid_point = points[np.argmin(distances)]
-
-        return mid_point, centroid
+        midpoint = points[np.argmin(distances)]
+        
+        return midpoint, centroid
     
 
     @staticmethod
-    def get_elevation_at_mid_point(mid_point):
+    def apply_transform(model: Union[trimesh.Scene, trimesh.Trimesh], 
+                       matrix: np.ndarray) -> None:
         """
-        Computes the elevation at the midpoint of a 3D model.
-
+        Apply transformation matrix to model (in-place).
+        
         Args:
-            mid_point (numpy.ndarray): The midpoint of the model.
-
-        Returns:
-            float: The elevation at the midpoint of the model.
+            model: 3D model
+            matrix: 4x4 transformation matrix
         """
+        if isinstance(model, trimesh.Scene):
+            for geom in model.geometry.values():
+                geom.apply_transform(matrix)
+        else:
+            model.apply_transform(matrix)
+
+
+class GeoTransformer:
+    """Main class for georeferencing 3D models."""
+    
+    def __init__(self, working_dir: str, input_file: str, output_folder: str, 
+                 lat: float, lon: float):
+        """
+        Initialize GeoTransformer.
+        
+        Args:
+            working_dir: Working directory containing transformation files
+            input_file: Path to input 3D model
+            output_folder: Output directory for georeferenced model
+            lat: Latitude of reference point
+            lon: Longitude of reference point
+        """
+        self.working_dir = working_dir
+        self.input_file = input_file
+        self.lat = float(lat)
+        self.lon = float(lon)
+        self.basename = os.path.splitext(os.path.basename(input_file))[0]
+        self.output_folder = os.path.join(output_folder, self.basename)
+        
+        # Validate directories
+        os.makedirs(self.output_folder, exist_ok=True)
+    
+
+    @staticmethod
+    def compute_web_mercator_scale_factor(lat: float) -> float:
+        """
+        Compute scale factor for Web Mercator projection at given latitude.
+        
+        The scale factor K = 1 / cos(latitude) represents the distortion
+        introduced by the Web Mercator projection.
+        
+        Args:
+            lat: Latitude in degrees
+            
+        Returns:
+            Scale factor K
+        """
+        lat_rad = np.radians(lat)
+        return 1.0 / np.cos(lat_rad)
+    
+
+    def _load_transformation_matrix(self) -> Optional[np.ndarray]:
+        """Load transformation matrix from working directory."""
+        matrix_path = os.path.join(self.working_dir, "transformation.txt")
+        
+        if not os.path.exists(matrix_path):
+            logger.error("⚠️ GeoRef_utils.py - Missing transformation.txt file")
+            return None
+        
+        try:
+            return MatrixUtils.load_matrix(matrix_path)
+        except Exception as e:
+            logger.error(f"❌ GeoRef_utils.py - Failed to load transformation matrix: {e}")
+            return None
+    
+
+    def _load_blender_matrix(self) -> Optional[np.ndarray]:
+        """Load and adjust Blender transformation matrix."""
+        matrix_path = os.path.join(self.working_dir, "matrix_blender.json")
+        
+        if not os.path.exists(matrix_path):
+            logger.warning("⚠️ GeoRef_utils.py - Blender matrix not found, skipping")
+            return None
+        
+        try:
+            with open(matrix_path, "r") as f:
+                matrix = np.array(json.load(f), dtype=np.float64)
+            
+            # Swap Y and Z translation components and negate Y
+            matrix[1][3], matrix[2][3] = matrix[2][3], -matrix[1][3]
+            
+            return matrix
+        except Exception as e:
+            logger.error(f"❌ GeoRef_utils.py - Failed to load Blender matrix: {e}")
+            return None
+    
+
+    def _get_elevation_at_model_midpoint(self, midpoint: np.ndarray) -> float:
+        """Get elevation at model midpoint by converting to WGS84."""
         transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
-        s_lon, s_lat = transformer.transform(mid_point[0], mid_point[1])
-
-        elevation = GeoTransformer.get_elevation(s_lat, s_lon)
-        logger.info(f"Elevation at location: {elevation}m")
-
-        return elevation
+        lon, lat = transformer.transform(midpoint[0], midpoint[1])
+        return ElevationService.get_elevation(lat, lon), lon, lat
     
 
-    @staticmethod
-    def move_model_to_origin(model, centroid):
+    def _apply_cesium_rotation(self, model: Union[trimesh.Scene, trimesh.Trimesh]) -> np.ndarray:
         """
-        Moves the 3D model so that the centroid is in the origin of the scene.
-
-        Args:
-            model (trimesh.Scene or trimesh.Trimesh): The 3D model.
-            centroid (numpy.ndarray): The centroid of the model.
-
+        Apply rotation to match Cesium coordinate system.
+        
         Returns:
-            trimesh.Scene or trimesh.Trimesh: The moved 3D model.
+            Rotation matrix applied
         """
-        translation = -centroid
+        rotation_matrix = trimesh.transformations.rotation_matrix(
+            np.radians(-90), [0, 1, 0]
+        )
+        return rotation_matrix
+    
+
+    def _export_heritage_data(self, matrices: Dict[str, np.ndarray], 
+                             elevation: float,
+                             longitude: float,
+                             latitude: float) -> None:
+        """
+        Export transformation data for Heritage Data Processor.
+        
+        Args:
+            matrices: Dictionary of transformation matrices
+            elevation: Elevation at model location
+        """
+        # Combine all transformations
+        final_matrix = (matrices['rotation_cesium'] @ 
+                       matrices['rotation_x_90'] @ 
+                       matrices['scale_matrix'] @ 
+                       matrices['translation_matrix'] @ 
+                       matrices['matrix_dim'] @ 
+                       matrices['T_blender_to_trimesh'] @ 
+                       matrices['blender_matrix'])
+        
+        # Decompose and log
+        params = MatrixUtils.decompose(final_matrix)
+
+        # Apply custom modifications to params for rotation and translation
+        original_euler_deg = params['euler_deg'].copy()
+        original_translation = params['translation'].copy()
+
+        params['euler_deg'][0] = -original_euler_deg[0]
+        params['euler_deg'][1] = -original_euler_deg[2]
+        params['euler_deg'][2] = -original_euler_deg[1]
+
+        params['translation'][0] = original_translation[0]
+        params['translation'][1] = -original_translation[2]
+        params['translation'][2] = original_translation[1]
+
+        elevation_gap = ElevationService.get_geoid_gap(longitude, latitude)
+
+        logger.info("=" * 60)
+        logger.info("HERITAGE DATA PROCESSOR EXPORT")
+        logger.info("=" * 60)
+        logger.info(f"Euler Angles (deg): {params['euler_deg']}")
+        logger.info(f"Translation: {params['translation']}")
+        logger.info(f"Mean Scale Factor: {np.mean(params['scale']):.6f}")
+        logger.info(f"Elevation: {elevation}m")
+        logger.info(f"Elevation Gap: {elevation_gap}m")
+        logger.info("=" * 60)
+        
+        # Save to JSON
+        output_path = os.path.join(self.output_folder, "heritage_data.json")
+        export_data = {
+            "lat": latitude,
+            "lon": longitude,
+            "place": "",
+            "description": "",
+            "scale": params['scale'].tolist(),
+            "rotation": params['euler_deg'].tolist(),
+            "translation": params['translation'].tolist()
+        }
+        
+        with open(output_path, 'w') as f:
+            json.dump(export_data, f, indent=2)
+    
+
+    def run(self) -> bool:
+        """
+        Execute the complete georeferencing pipeline.
+        
+        Returns:
+            True if successful, False otherwise
+        """        
+        # Step 1: Load transformation matrix
+        matrix_dim = self._load_transformation_matrix()
+        if matrix_dim is None:
+            return False
+        
+        # Step 2: Load 3D model
+        model_path = os.path.join(self.working_dir, f"{self.basename}_scaled.glb")
+        
+        if not os.path.exists(model_path):
+            logger.error(f"❌ GeoRef_utils.py - Model not found: {model_path}")
+            return False
+        
+        try:
+            model = trimesh.load(model_path)
+        except Exception as e:
+            logger.error(f"❌ GeoRef_utils.py - Failed to load model: {e}")
+            return False
+        
+        # Step 2: Apply Blender to Trimesh transformation
+        T_blender_to_trimesh = MatrixUtils.blender_to_trimesh_matrix()
+        ModelAnalyzer.apply_transform(model, T_blender_to_trimesh)
+        
+        # Step 3: Decompose and rebuild transformation matrix
+        params = MatrixUtils.decompose(matrix_dim)
+        
+        # Reorder components (coordinate system conversion)
+        angle_deg = [params["euler_deg"][0], 
+                    params["euler_deg"][1], 
+                    params["euler_deg"][2]]
+        translation = [params["translation"][0], 
+                      params["translation"][1], 
+                      params["translation"][2]]
+        mean_scale = np.mean([params["scale"][0], params["scale"][1]])
+        
+        # Rebuild matrix
+        R = trimesh.transformations.euler_matrix(np.radians(angle_deg[0]), 
+                                                 np.radians(angle_deg[1]), 
+                                                 np.radians(angle_deg[2]), 
+                                                 axes='sxyz')
         T = trimesh.transformations.translation_matrix(translation)
-        
-        if isinstance(model, trimesh.Scene):
-            for geom in model.geometry.values():
-                geom.apply_transform(T)
-        else:
-            model.apply_transform(T)
-
-    
-        return model, T
-    
-    
-    @staticmethod
-    def export_model(model, out_path):
-        """
-        Export model to glb file.
-
-        Args:
-            model (trimesh.Scene or trimesh.Trimesh): The 3D model.
-            out_path (str): Path to the output directory.
-
-        Returns:
-            None
-        """
-        # os.makedirs(output_folder, exist_ok=True)
-        # file_path = os.path.join(output_folder, basename + "_georef.glb")
-        model.export(out_path, file_type="glb")
-    
-
-    @staticmethod
-    def to_cesium(model):
-        """
-        Apply 90 degrees rotations around X and Z axes to the model, 
-        to match the Cesium coordinate system.
-
-        Args:
-            model (trimesh.Scene or trimesh.Trimesh): The 3D model.
-
-        Returns:
-            None
-        """
-        # Apply 90 degrees rotation around X axis
-        R_x = trimesh.transformations.rotation_matrix(np.radians(-90), [1,0,0])
-        model.apply_transform(R_x)
-
-        # Apply 90 degrees rotation around Z axis
-        R_z = trimesh.transformations.rotation_matrix(np.radians(-90), [0,1,0])
-        model.apply_transform(R_z)
-
-        # M_rot_cesium = R_z @ R_x
-
-        return model, R_x, R_z
-
-    @staticmethod
-    def to_heritage_data_processor(S_k, M_translation, matrix_4x4, matrix_blender_path):
-        with open(matrix_blender_path, "r") as f:
-            matrix_blender = np.array(json.load(f), dtype=np.float64)
-        
-        # Now all matrices are 4x4
-        final_matrix = matrix_blender
-        
-        transformation_params = GeoTransformer.decompose_matrix(final_matrix)
-        
-
-        angle_deg_0 = transformation_params["euler_deg"][0]
-        angle_deg_1 = transformation_params["euler_deg"][1]
-        angle_deg_2 = transformation_params["euler_deg"][2]
-        translation = [transformation_params["translation"][0], transformation_params["translation"][1], 0]
-        scale_factors = [transformation_params["scale"][0], transformation_params["scale"][1], 1.0]
-
-        print("Angle 1 (deg):", angle_deg_0)
-        print("Angle 2 (deg):", angle_deg_1)
-        print("Angle 3 (deg):", angle_deg_2)
-        print("Translation:", translation)
-        print("Scale Factors:", scale_factors)
-
-
-    def run_GeoTransformer(self):
-        """
-        Runs the GeoTransformer, applying the transformation matrix to the model and exporting it to glb.
-
-        Returns:
-            None
-        """
-        if not os.path.exists(os.path.join(self.working_dir, "transformation.txt")):
-            logger.error("⚠️  Missing transformation.txt file. Cannot apply transformation.")
-            return
-        matrix_4x4 = GeoTransformer.load_matrix_4x4(os.path.join(self.working_dir, "transformation.txt"))
-        model = trimesh.load(os.path.join(self.working_dir, self.base_name + "_scaled.glb"))
-
-        # Blender to trimesh conversion
-        T = self.blender_to_trimesh_transform()
-        if isinstance(model, trimesh.Scene):
-            for geom in model.geometry.values():
-                geom.apply_transform(T)
-        else:
-            model.apply_transform(T)
-
-        # Decompose Matrix 4x4 an get values
-        transformation_params = GeoTransformer.decompose_matrix(matrix_4x4)
-        angle_deg_2 = transformation_params["euler_deg"][2]
-        translation = [transformation_params["translation"][0], transformation_params["translation"][1], 0]
-        scale_factors = [transformation_params["scale"][0], transformation_params["scale"][1], 1.0]
-
-        # --- Rotation Matrix ---
-        angle_rad = np.radians(angle_deg_2)
-        axis = [0, 0, 1]
-        R = trimesh.transformations.rotation_matrix(angle_rad, axis)
-
-        # --- Translation Matrix ---
-        T = np.eye(4)
-        T[:3, 3] = translation
-
-        # --- Scale Matrix ---
         S = np.eye(4)
-        mean_scale_factor = np.mean([scale_factors[0], scale_factors[1]])
-        S[0,0] = mean_scale_factor
-        S[1,1] = mean_scale_factor
-        S[2,2] = mean_scale_factor
-
+        S[0, 0] = S[1, 1] = S[2, 2] = mean_scale
+        
         matrix_dim = T @ R @ S
-
-        # --- Apply transformation ---
-        if isinstance(model, trimesh.Scene):
-            for geom in model.geometry.values():
-                geom.apply_transform(matrix_dim)
-        else:
-            model.apply_transform(matrix_dim)
         
-        # --- Obtain the mid_point of the model ---
-        mid_point, centroid = GeoTransformer.get_mid_point(model)
+        # Step 4: Apply transformation
+        ModelAnalyzer.apply_transform(model, matrix_dim)
 
-        # # --- Get elevation at mid_point ---
-        # elevation_at_mid_point = GeoTransformer.get_elevation_at_mid_point(mid_point)
-
-        # --- Move model to origin ---
-        model, M_translation = GeoTransformer.move_model_to_origin(model, centroid)
-
-        # # Compute scale factor correct
-        # scale_factor_K = GeoTransformer.compute_scale_factor_correct(self.lat)
-
-        # # --- Apply scale_factor_K to model ---
-        # S_k = np.eye(4)
-        # S_k[0,0] = S_k[1,1] = S_k[2,2] = 1 / scale_factor_K
-        # model.apply_transform(S_k)
+        # # Step 4.5: Save scaled model
+        # scaled_model_path = os.path.join(self.output_folder, f"{self.basename}_dim.obj")
+        # model.export(scaled_model_path, file_type="obj")
         
-        # Convert the model to Cesium format with to_cesium()
-        # model, R_x, R_z = GeoTransformer.to_cesium(model)
+        # Step 5: Calculate model center
+        midpoint, centroid = ModelAnalyzer.get_centroid_and_midpoint(model)
         
-        # Export model
-        out_path = os.path.join(self.output_folder, self.basename + "_georef.glb")
-        GeoTransformer.export_model(model, out_path)
+        # Step 6: Get elevation
+        elevation, lon, lat = self._get_elevation_at_model_midpoint(midpoint)
+        
+        # Step 7: Move to origin
+        translation_matrix = trimesh.transformations.translation_matrix(-centroid)
+        ModelAnalyzer.apply_transform(model, translation_matrix)
+        
+        # Step 8: Apply Web Mercator scale correction
+        scale_factor = self.compute_web_mercator_scale_factor(self.lat)
+        
+        scale_matrix = np.eye(4)
+        scale_matrix[0, 0] = scale_matrix[1, 1] = scale_matrix[2, 2] = 1 / scale_factor
+        ModelAnalyzer.apply_transform(model, scale_matrix)
 
-        # matrix_blender = os.path.join(self.working_dir, "matrix_blender.json")
-        # GeoTransformer.to_heritage_data_processor(S_k, M_translation, matrix_dim, matrix_blender)
+        # Step 9: Rotate model 90 degrees around X axis
+        rotation_x_90 = trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0])
+        ModelAnalyzer.apply_transform(model, rotation_x_90)
+        
+        # Step 10: Convert to Cesium coordinate system
+        rotation_cesium = self._apply_cesium_rotation(model)
+        ModelAnalyzer.apply_transform(model, rotation_cesium)
 
+        # Step 11: Export georeferenced model
+        output_path = os.path.join(self.output_folder, f"{self.basename}_georef.glb")
 
+        # Step 12: Apply elevation to model
+        # TO DO...
+        
+        try:
+            model.export(output_path, file_type="glb")
+        except Exception as e:
+            logger.error(f"❌ GeoRef_utils.py - Failed to export model: {e}")
+            return False
+        
+        # Step 11: Export heritage data (if Blender matrix available)
+        blender_matrix = self._load_blender_matrix()
+        if blender_matrix is not None:
+            matrices = {
+                'rotation_cesium': rotation_cesium,
+                'rotation_x_90': rotation_x_90,
+                'scale_matrix': scale_matrix,
+                'translation_matrix': translation_matrix,
+                'matrix_dim': matrix_dim,
+                'T_blender_to_trimesh': T_blender_to_trimesh,
+                'blender_matrix': blender_matrix
+            }
+            self._export_heritage_data(matrices, elevation, lon, lat)
+        
+        return True
 
 if __name__ == "__main__":
     gt = GeoTransformer(
-        working_dir="/tmp/piazzaDuomoTrento/",
-        input_file="/data/input/piazzaDuomoTrento.glb",
+        working_dir="/tmp/colosseo/",
+        input_file="/data/input/colosseo.glb",
         output_folder="/data/output/",
-        lat="46.067123",
-        lon="11.121544"
+        lat="41.889732",
+        lon="12.491350"
     )
-    gt.run_GeoTransformer()
+    gt.run()
