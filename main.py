@@ -6,7 +6,7 @@ from pipeline.core import PipelineProcessor
 # ===== Function: parse_args =====
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--input_file", required=True, help="Path to input .obj/.ply/.fbx/.glb/.gltf file")
+    parser.add_argument("-i", "--input_file", required=True, help="Path to input .glb/.gltf file")
     parser.add_argument("-o", "--output_folder", required=True, help="Folder to save outputs")
     parser.add_argument("--streetviews", type=str, default="5", help="Number of streetview-style renderings around the model (default: 5)")
     parser.add_argument("--nr_prediction", type=str, default="1", help="Number of gps prediction (default: 1) - GeoClip only")

@@ -10,12 +10,12 @@ from pyproj import Transformer
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
-from geoloc_geoclip import GeoClipBatchPredictor
-from geoloc_ollama import ImageToCoordinates
-from geoloc_geminiAI import GeminiGeolocator
-from satellite_imagery_downloader import satelliteTileDownloader
-from georef_dim import georef_dim
-from georef_utils import GeoTransformer, ElevationService
+from pipeline.geolocation import GeoClipBatchPredictor
+from pipeline.geolocation import ImageToCoordinates
+from pipeline.geolocation import GeminiGeolocator
+from pipeline.services import satelliteTileDownloader
+from pipeline.georeferencing import georef_dim
+from pipeline.georeferencing import GeoTransformer, ElevationService
 
 
 
@@ -88,7 +88,7 @@ class PipelineProcessor:
         # Base command
         blender_cmd = [
             "blender", "-b",
-            "--python", "/app/pipeline/render_multiview.py",
+            "--python", "/app/pipeline/rendering/multiview.py",
             "--", "--input_file", input_file,
             "--output_folder", self.working_dir
         ]

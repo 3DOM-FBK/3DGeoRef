@@ -16,7 +16,7 @@ services:
     # image: 3dgeoref-python_app
     build:
       context: .
-      dockerfile: Dockerfile.python
+      dockerfile: Dockerfile
     container_name: 3dgeoref_python
     depends_on:
       - ollama

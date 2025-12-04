@@ -67,3 +67,10 @@ RUN pip3 install -e .
 #        WORK DIRECTORY
 # -----------------------------
 WORKDIR /app
+
+# -----------------------------
+#        COPY FILES
+# -----------------------------
+COPY pipeline/ /app/pipeline/
+COPY hdri/ /app/hdri/
+COPY main.py /app/main.py

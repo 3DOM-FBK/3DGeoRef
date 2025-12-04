@@ -1,4 +1,11 @@
 # Ignore Ollama model folder
 ollama_model/
 
-python/__pycache__/
+# Ignore all __pycache__ directories
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore start script
+start.py
+
