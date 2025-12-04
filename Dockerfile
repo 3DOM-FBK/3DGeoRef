@@ -6,6 +6,8 @@ ENV BLENDER_VERSION=4.4.0
 ENV BLENDER_URL=https://download.blender.org/release/Blender4.4/blender-${BLENDER_VERSION}-linux-x64.tar.xz
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=$CUDA_HOME/bin:/root/.local/bin:$PATH
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # -----------------------------
 #     SYSTEM DEPENDENCIES
@@ -57,11 +59,6 @@ RUN sed -i 's|# from deep_image_matching.parser import parse_cli|from deep_image
 
 # install DIM in editable mode
 RUN pip3 install -e .
-
-# # -----------------------------
-# #       ADD EGM2008 FILE
-# # -----------------------------
-# COPY ./egm2008-1/egm2008-1.pgm /opt/egm2008-1/egm2008-1.pgm
 
 # -----------------------------
 #        WORK DIRECTORY
