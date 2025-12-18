@@ -460,4 +460,15 @@ class PipelineProcessor:
             # Fallback: no ortho or API key
             logger.info(f"Approximate Location: lat={lat}, lon={lon}, elevation={elevation}")
             logger.info("--> To refine the location, provide a valid MAPBOX API key or ortho images.")
+
+        # --------------------------
+        # Step 5: Save Orthophoto (Temporary)
+        # --------------------------
+        ortho_src = os.path.join(self.working_dir, "images", self.base_name + ".tif")
+        if os.path.exists(ortho_src):
+            destination_path = os.path.join(self.args.output_folder, self.base_name + ".tif")
+            shutil.copy(ortho_src, destination_path)
+            logger.info(f"✅ Orthophoto copied to: {destination_path}")
+        else:
+            logger.info(f"ℹ️  No orthophoto found to copy at {ortho_src}")
         

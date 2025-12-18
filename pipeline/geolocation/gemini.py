@@ -4,6 +4,7 @@ from PIL import Image
 import google.genai as genai
 from google.genai.types import GenerateContentConfig
 from collections import Counter
+import time
 
 # 1. Configuration and Initialization
 # Make sure the GEMINI_API_KEY environment variable is set.
@@ -15,7 +16,7 @@ class GeminiGeolocator:
     and returns GPS coordinates with the highest possible precision.
     """
 
-    def __init__(self, exclude_keywords=None, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, exclude_keywords=None, model_name: str = "gemini-2.5-flash", delay_seconds: float = 15.0):
         """
         Initializes the GeminiGeolocator client and configuration.
         
@@ -31,6 +32,7 @@ class GeminiGeolocator:
             )
 
         self.model_name = model_name
+        self.delay_seconds = delay_seconds
         self.exclude_keywords = exclude_keywords or ["top_view"]
         self.system_prompt = (
             "You are a highly specialized geographic AI expert. "
@@ -123,7 +125,10 @@ class GeminiGeolocator:
         all_predictions = []
 
         # Process each image
-        for filename in image_files:
+        for i, filename in enumerate(image_files):
+            if i > 0:
+                time.sleep(self.delay_seconds)
+
             image_path = os.path.join(folder_path, filename)
             try:
                 result = self.geolocate_image(image_path)

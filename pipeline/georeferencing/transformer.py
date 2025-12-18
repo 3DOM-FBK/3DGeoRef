@@ -462,13 +462,17 @@ class GeoTransformer:
         S[0, 0] = S[1, 1] = S[2, 2] = mean_scale
         
         matrix_dim = T @ R @ S
+
+
+        print (f"--> Scale: {mean_scale}")
+        print (f"--> matrix_dim: {matrix_dim}")
         
         # Step 4: Apply transformation
         ModelAnalyzer.apply_transform(model, matrix_dim)
 
-        # # Step 4.5: Save scaled model
-        # scaled_model_path = os.path.join(self.output_folder, f"{self.basename}_dim.obj")
-        # model.export(scaled_model_path, file_type="obj")
+        # Step 4.5: Save scaled model
+        scaled_model_path = os.path.join(self.output_folder, f"{self.basename}_dim.obj")
+        model.export(scaled_model_path, file_type="obj", include_texture=False)
         
         # Step 5: Calculate model center
         midpoint, centroid = ModelAnalyzer.get_centroid_and_midpoint(model)
@@ -482,6 +486,8 @@ class GeoTransformer:
         
         # Step 8: Apply Web Mercator scale correction
         scale_factor = self.compute_web_mercator_scale_factor(self.lat)
+
+        print (f"--> Scale factor: {scale_factor}")
         
         scale_matrix = np.eye(4)
         scale_matrix[0, 0] = scale_matrix[1, 1] = scale_matrix[2, 2] = 1 / scale_factor

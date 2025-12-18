@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 # --- Variables ---
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,13 +35,13 @@ RUN wget $BLENDER_URL && \
 # -----------------------------
 RUN pip3 install --upgrade pip && \
     pip3 install \
-        numpy Pillow rasterio geoclip pyproj \
-        google-genai \
-        pycolmap==3.12.6 \
-        trimesh open3d \
-        enlighten pygeodesy \
-        ollama \
-        setuptools && \
+    numpy Pillow rasterio geoclip pyproj \
+    google-genai \
+    pycolmap==3.12.6 \
+    trimesh open3d \
+    enlighten pygeodesy \
+    ollama \
+    setuptools && \
     pip3 install torch torchvision
 
 ENV OLLAMA_HOST=http://ollama:11434
