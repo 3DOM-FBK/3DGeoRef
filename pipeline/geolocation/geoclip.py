@@ -1,5 +1,6 @@
 import os
 import json
+import gc
 import torch
 from geoclip import GeoCLIP
 from collections import Counter
@@ -25,10 +26,35 @@ class GeoClipBatchPredictor:
         self.top_k = top_k
         self.exclude_keywords = exclude_keywords or ["top_view"]
 
+    def cleanup(self):
+        """
+        Explicitly releases the GeoCLIP model from memory.
+        This is important to free GPU/CPU memory after predictions are complete.
+        """
+        if hasattr(self, 'model') and self.model is not None:
+            # Move model to CPU first (if on GPU) to free VRAM
+            try:
+                self.model.cpu()
+            except:
+                pass
+            
+            # Delete the model
+            del self.model
+            self.model = None
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Clear CUDA cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     def predict_folder(self, folder_path: str):
         """
         Predicts the most common GPS location from multiple images in a folder.
+        After predictions are complete, the model is automatically cleaned up
+        to free memory.
 
         Args:
             folder_path (str): Path to the folder containing images.
@@ -39,6 +65,7 @@ class GeoClipBatchPredictor:
                     and all_predictions_counter is a Counter of all predicted coordinates.
         """
         if not os.path.isdir(folder_path):
+            self.cleanup()
             return None, None
 
         # Collect valid image files
@@ -49,6 +76,7 @@ class GeoClipBatchPredictor:
         ])
 
         if not image_files:
+            self.cleanup()
             return None, None
 
         all_predictions = []
@@ -61,6 +89,9 @@ class GeoClipBatchPredictor:
                 all_predictions.extend([tuple(gps) for gps in gps_preds])
             except Exception:
                 continue
+
+        # Cleanup model to free memory BEFORE returning
+        self.cleanup()
 
         # Determine the most common prediction
         counter = Counter(all_predictions)

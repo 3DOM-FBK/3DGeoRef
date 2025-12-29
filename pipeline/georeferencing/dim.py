@@ -10,7 +10,7 @@ from pathlib import Path
 
 class georef_dim():
 
-    def __init__(self, ortho_path, render_path, output_path, database_path, debug=False):
+    def __init__(self, ortho_path, render_path, output_path, database_path, debug=True):
         self.ortho_path = Path(ortho_path)
         self.render_path = Path(render_path)
         self.output_path = Path(output_path)
@@ -59,6 +59,9 @@ class georef_dim():
 
         # Select the pair with the maximum inlier matches
         best_index = int(np.argmax(all_matches))
+
+        print (f"Selected pair: '{all_pairs[best_index][0]}' and '{all_pairs[best_index][1]}'")
+
         return all_pairs[best_index]
 
 
@@ -136,7 +139,8 @@ class georef_dim():
         elif rotation == 180:
             keypoints_render = np.array([[img_w - x, img_h - y] for x, y in keypoints_render])
         elif rotation == 270:
-            keypoints_render = np.array([[img_w - y, x] for x, y in keypoints_render])
+            # keypoints_render = np.array([[img_w - y, x] for x, y in keypoints_render])
+            keypoints_render = np.array([[img_h - y, x] for x, y in keypoints_render])
 
         # Scale ortho keypoints
         keypoints_ortho = np.rint(images[self.ortho_path.name]["keypoints"] / scale).astype(np.int32)
@@ -156,6 +160,15 @@ class georef_dim():
         pts_render = pts_render[maskA.ravel() == 0]
         pts_ortho = pts_ortho[maskA.ravel() == 0]
 
+        # Export original tiepoints for self.debugging
+        if self.debug:
+            with open("./ortho_tiepoints.txt", 'w') as f:
+                for pt in pts_ortho:
+                    f.write(f"{pt[0]}, {pt[1]}\n")
+            with open("./render_tiepoints.txt", 'w') as f:
+                for pt in pts_render:
+                    f.write(f"{pt[0]}, {pt[1]}\n")
+
         # Apply ortho image geotransform
         pts_ortho_h = np.hstack([pts_ortho, np.ones((pts_ortho.shape[0], 1))])
         pts_ortho = (transform @ pts_ortho_h.T).T[:, :2]
@@ -164,8 +177,9 @@ class georef_dim():
         T = transform @ A
 
         with open(self.output_path, 'w') as f:
-            for i in range(3):
-                f.write(f"{T[i, 0]} {T[i, 1]} 0.0 {T[i, 2]}\n")
+            f.write(f"{T[0, 0]} {T[0, 1]} 0.0 {T[0, 2]}\n")
+            f.write(f"{T[1, 0]} {T[1, 1]} 0.0 {T[1, 2]}\n")
+            f.write("0.0 0.0 1.0 0.0\n")
             f.write("0.0 0.0 0.0 1.0\n")
 
         # Apply transformation to render points

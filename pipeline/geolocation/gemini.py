@@ -16,7 +16,7 @@ class GeminiGeolocator:
     and returns GPS coordinates with the highest possible precision.
     """
 
-    def __init__(self, exclude_keywords=None, model_name: str = "gemini-2.5-flash", delay_seconds: float = 15.0):
+    def __init__(self, exclude_keywords=None, model_name: str = "gemini-2.5-flash-lite", delay_seconds: float = 15.0):
         """
         Initializes the GeminiGeolocator client and configuration.
         

@@ -5,14 +5,17 @@ import shutil
 import trimesh
 import numpy as np
 import logging
+import gc
 from PIL import Image
 from pyproj import Transformer
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
-from pipeline.geolocation import GeoClipBatchPredictor
-from pipeline.geolocation import ImageToCoordinates
-from pipeline.geolocation import GeminiGeolocator
+# Lazy imports for geolocation modules (loaded only when needed to save memory)
+# from pipeline.geolocation import GeoClipBatchPredictor  # Loaded in estimate_geoloc_geoclip
+# from pipeline.geolocation import ImageToCoordinates     # Loaded in estimate_geoloc_ollama
+# from pipeline.geolocation import GeminiGeolocator       # Loaded in estimate_geoloc_geminiAI
+
 from pipeline.services import satelliteTileDownloader
 from pipeline.georeferencing import georef_dim
 from pipeline.georeferencing import GeoTransformer, ElevationService
@@ -45,6 +48,28 @@ class PipelineProcessor:
         self.working_dir = os.path.join("/tmp", self.base_name)
 
         os.makedirs(self.working_dir, exist_ok=True)
+
+
+    # ===== Function: _free_memory =====
+    def _free_memory(self):
+        """
+        Frees up memory by running garbage collection and clearing GPU cache if available.
+        This is especially important after running memory-intensive operations like GeoCLIP.
+        """
+        # Run Python garbage collection
+        gc.collect()
+        
+        # Clear PyTorch GPU cache if available
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.debug("🧹 GPU cache cleared.")
+        except ImportError:
+            pass  # PyTorch not installed, skip GPU cleanup
+        
+        logger.debug("🧹 Memory freed after geolocation.")
 
 
     # ===== Function: clear_tmp_directory =====
@@ -119,11 +144,27 @@ class PipelineProcessor:
         logger.info("📍 Estimating geolocation using GeoCLIP...")
 
         try:
+            # Lazy import to avoid loading PyTorch/GeoCLIP when not needed
+            from pipeline.geolocation.geoclip import GeoClipBatchPredictor
+            
             # Create the batch predictor
             predictor = GeoClipBatchPredictor(top_k=int(nr_prediction))
 
             # Run predictions on the working directory
             most_common, counter = predictor.predict_folder(self.working_dir)
+            
+            # Explicitly delete predictor and force memory cleanup
+            del predictor
+            gc.collect()
+            
+            # Additional CUDA cleanup
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except ImportError:
+                pass
 
             if not most_common:
                 logger.error("❌ No geolocation predictions could be computed.")
@@ -150,6 +191,9 @@ class PipelineProcessor:
         logger.info("📍 Estimating geolocation using Ollama...")
 
         try:
+            # Lazy import to avoid loading Ollama when not needed
+            from pipeline.geolocation.ollama import ImageToCoordinates
+            
             # Create the batch predictor
             predictor = ImageToCoordinates(ollama_model="llama3.2-vision")
 
@@ -179,6 +223,9 @@ class PipelineProcessor:
         logger.info("📍 Estimating geolocation using Gemini AI...")
 
         try:
+            # Lazy import to avoid loading Gemini when not needed
+            from pipeline.geolocation.gemini import GeminiGeolocator
+            
             # Create the batch predictor
             predictor = GeminiGeolocator()
 
@@ -373,6 +420,10 @@ class PipelineProcessor:
         2. Estimate geolocation
         3. Get elevation
         4. Handle ortho/satellite images and apply transforms
+        
+        Returns:
+            bool: True if pipeline completed successfully, False otherwise.
+            tuple: (lat, lon) if mode is "geoloc" and successful.
         """
 
         logger.info("Start Pipeline")
@@ -393,10 +444,15 @@ class PipelineProcessor:
         # Step 1: Synthetic views
         # --------------------------
         if mode in ("auto", "geoloc", "dim"):
-            self.generate_synthetic_views(
-                input_file=self.args.input_file,
-                streetviews=3
-            )
+            try:
+                self.generate_synthetic_views(
+                    input_file=self.args.input_file,
+                    streetviews=3
+                )
+            except Exception as e:
+                logger.error(f"❌ Step 1 (Synthetic Views) failed: {e}")
+                logger.error("⛔ Pipeline interrupted. Skipping subsequent steps.")
+                return False
 
         # --------------------------
         # Step 2: Geolocation
@@ -410,13 +466,21 @@ class PipelineProcessor:
                 geoloc_model = getattr(self.args, "geoloc_model", "gemini").lower()
                 logger.info(f"Estimating location using {geoloc_model} model")
                 
-                if geoloc_model == "geoclip":
-                    lat, lon = self.estimate_geoloc_geoclip(self.args.nr_prediction)
-                elif geoloc_model == "ollama":
-                    lat, lon = self.estimate_geoloc_ollama(self.args.nr_prediction)
-                else:
-                    # Default: Gemini
-                    lat, lon = self.estimate_geoloc_geminiAI(self.args.nr_prediction)
+                try:
+                    if geoloc_model == "geoclip":
+                        lat, lon = self.estimate_geoloc_geoclip(self.args.nr_prediction)
+                    elif geoloc_model == "ollama":
+                        lat, lon = self.estimate_geoloc_ollama(self.args.nr_prediction)
+                    else:
+                        # Default: Gemini
+                        lat, lon = self.estimate_geoloc_geminiAI(self.args.nr_prediction)
+                except Exception as e:
+                    logger.error(f"❌ Step 2 (Geolocation) failed: {e}")
+                    logger.error("⛔ Pipeline interrupted. Skipping subsequent steps.")
+                    return False
+            
+            # Free memory after geolocation (especially important for GeoCLIP)
+            self._free_memory()
             
             logger.info(f"Estimated Location: lat={lat}, lon={lon}")
 
@@ -426,49 +490,81 @@ class PipelineProcessor:
         elif mode == "dim":
             if self.args.lat is None or self.args.lon is None:
                 logger.error("Mode 'dim' requires lat and lon to be provided.")
-                return
+                logger.error("⛔ Pipeline interrupted. Skipping subsequent steps.")
+                return False
             lat, lon = self.args.lat, self.args.lon
             logger.info(f"Using provided Location: lat={lat}, lon={lon}")
 
         # --------------------------
-        # Step 3: Elevation -- Change...
+        # Step 3: Elevation
         # --------------------------
-        elevation = ElevationService.get_elevation(lat, lon)
-        logger.info(f"Orto Elevation at location: {elevation}m")
+        try:
+            elevation = ElevationService.get_elevation(lat, lon)
+            logger.info(f"Orto Elevation at location: {elevation}m")
+        except Exception as e:
+            logger.error(f"❌ Step 3 (Elevation) failed: {e}")
+            logger.error("⛔ Pipeline interrupted. Skipping subsequent steps.")
+            return False
 
         # --------------------------
         # Step 4: Ortho / Satellite imagery
         # --------------------------
         ortho_provided = getattr(self.args, "ortho", None)
 
-        if ortho_provided:
-            logger.info("--> Using user-provided ortho images")
-            self.move_images_to_subfolder(ortho_provided)
-            self.run_deep_image_matching_and_georef(self.base_name)
-            self.apply_transform(lat, lon)
-
-        elif mapbox_key:
-            logger.info("--> Downloading satellite imagery using MAPBOX API")
-            if self.download_satellite_imagery(lat, lon, self.args.area_size_m, self.args.zoom):
-                self.move_images_to_subfolder()
+        try:
+            if ortho_provided:
+                logger.info("--> Using user-provided ortho images")
+                self.move_images_to_subfolder(ortho_provided)
                 self.run_deep_image_matching_and_georef(self.base_name)
                 self.apply_transform(lat, lon)
-            else:
-                logger.warning("Failed to download satellite imagery.")
 
-        else:
-            # Fallback: no ortho or API key
-            logger.info(f"Approximate Location: lat={lat}, lon={lon}, elevation={elevation}")
-            logger.info("--> To refine the location, provide a valid MAPBOX API key or ortho images.")
+            elif mapbox_key:
+                logger.info("--> Downloading satellite imagery using MAPBOX API")
+                if self.download_satellite_imagery(lat, lon, self.args.area_size_m, self.args.zoom):
+                    self.move_images_to_subfolder()
+                    self.run_deep_image_matching_and_georef(self.base_name)
+                    self.apply_transform(lat, lon)
+                else:
+                    logger.warning("Failed to download satellite imagery.")
+                    logger.error("⛔ Pipeline interrupted. Skipping subsequent steps.")
+                    return False
+
+            else:
+                # Fallback: no ortho or API key
+                logger.info(f"Approximate Location: lat={lat}, lon={lon}, elevation={elevation}")
+                logger.info("--> To refine the location, provide a valid MAPBOX API key or ortho images.")
+
+        except Exception as e:
+            logger.error(f"❌ Step 4 (Ortho/Satellite imagery) failed: {e}")
+            logger.error("⛔ Pipeline interrupted. Skipping subsequent steps.")
+            return False
 
         # --------------------------
         # Step 5: Save Orthophoto (Temporary)
         # --------------------------
-        ortho_src = os.path.join(self.working_dir, "images", self.base_name + ".tif")
-        if os.path.exists(ortho_src):
-            destination_path = os.path.join(self.args.output_folder, self.base_name + ".tif")
-            shutil.copy(ortho_src, destination_path)
-            logger.info(f"✅ Orthophoto copied to: {destination_path}")
-        else:
-            logger.info(f"ℹ️  No orthophoto found to copy at {ortho_src}")
+        try:
+            ortho_src = os.path.join(self.working_dir, "images", self.base_name + ".tif")
+            if os.path.exists(ortho_src):
+                destination_path = os.path.join(self.args.output_folder, self.base_name, self.base_name + ".tif")
+                shutil.copy(ortho_src, destination_path)
+                logger.info(f"✅ Orthophoto copied to: {destination_path}")
+            else:
+                logger.info(f"ℹ️  No orthophoto found to copy at {ortho_src}")
+        except Exception as e:
+            logger.error(f"❌ Step 5 (Save Orthophoto) failed: {e}")
+            return False
+        
+        # Temporary folder backup
+        try:
+            backup_path = os.path.join(self.args.output_folder, self.base_name, "working_dir_backup")
+            if os.path.exists(self.working_dir):
+                shutil.copytree(self.working_dir, backup_path, dirs_exist_ok=True)
+                logger.info(f"✅ Backup della cartella temporanea creato in: {backup_path}")
+        except Exception as e:
+            logger.error(f"❌ Errore durante il backup della cartella temporanea: {e}")
+
+        logger.info("✅ Pipeline completed successfully.")
+        return True
+        
+    
         

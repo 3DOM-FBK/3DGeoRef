@@ -224,7 +224,55 @@ class satelliteTileDownloader():
         width_px = tiles_x * tile_size_px
         height_px = tiles_y * tile_size_px
 
-        mosaic = Image.new('RGB', (width_px, height_px))
+        # --- SAFETY CHECK: Prevent Decompression Bomb DOS Attack ---
+        # Calculate expected size based on area_size_m
+        # Ground resolution (m/px)
+        res_m_px = self.meters_per_pixel(zoom_level, self.center_lat)
+        
+        # Expected pixels (pixels per side)
+        expected_px_side = self.area_size_m / res_m_px
+        
+        # Max reasonable pixels (area) with safety factor (e.g., 3x buffer for tile alignment/padding)
+        # Using area because width/height can vary depending on shape
+        expected_area_px = expected_px_side * expected_px_side
+        max_allowed_area_px = expected_area_px * 9  # 3x linear dimension = 9x area
+        
+        # Absolute hard limit (e.g., 25000x25000 = 625M pixels, well below typical DOS limits of 1.3B)
+        HARD_LIMIT_PIXELS = 500_000_000  # 500 Megapixels
+
+        current_area_px = width_px * height_px
+
+        # Check relative to expected size
+        if current_area_px > max_allowed_area_px and current_area_px > 10_000_000: # Only check if image is reasonably big (>10MP)
+             # But if it's smaller than the hard limit, we might allow it if user asked for it? 
+             # The user asked to filter bad images that are obviously wrong.
+             pass
+
+        if current_area_px > HARD_LIMIT_PIXELS:
+            error_msg = (
+                f"Generated image too large: {width_px}x{height_px} ({current_area_px} px). "
+                f"Limit is {HARD_LIMIT_PIXELS} px. "
+                f"Expected approx {int(expected_px_side)}x{int(expected_px_side)} based on area_size_m={self.area_size_m}."
+            )
+            print(f"❌ ERROR: {error_msg}")
+            raise ValueError(error_msg)
+        
+        # Check against expected size (if > 10x expected, it's likely a bug)
+        if current_area_px > (expected_area_px * 25): # 5x linear dimension mismatch
+             error_msg = (
+                f"Generated image anomaly: {width_px}x{height_px} ({current_area_px} px) "
+                f"is way larger than expected {int(expected_px_side)}x{int(expected_px_side)}. "
+                f"Check lat/lon or tile calculation."
+            )
+             print(f"❌ ERROR: {error_msg}")
+             raise ValueError(error_msg)
+        # -----------------------------------------------------------
+
+        try:
+            mosaic = Image.new('RGB', (width_px, height_px))
+        except Image.DecompressionBombError:
+             print(f"❌ ERROR: Image too large, exceeded PIL limit.")
+             raise
 
         for x, y, filename in tiles:
             img = Image.open(os.path.join(tile_folder, filename))
