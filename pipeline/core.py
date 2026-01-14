@@ -245,7 +245,7 @@ class PipelineProcessor:
 
 
     # ===== Function: download_satellite_imagery =====
-    def download_satellite_imagery(self, lat, lon, area_size_m, zoom):
+    def download_satellite_imagery(self, lat, lon, area_size, zoom):
         """
         Downloads satellite imagery for a specified geographic location. Requires latitude, longitude,
         area size, zoom level, and an API key. Executes an external Python script as a subprocess and logs the
@@ -254,20 +254,20 @@ class PipelineProcessor:
         Args:
             lat (float): Latitude of the center point for the imagery.
             lon (float): Longitude of the center point for the imagery.
-            area_size_m (float): Size of the area to download in meters.
+            area_size (float): Size of the area to download in meters.
             zoom (int): Zoom level for the satellite imagery.
             api_key (str): Valid API key for accessing satellite imagery. - Mapbox or Google Maps.
 
         Returns:
             bool: True if the download succeeds, False otherwise.
         """
-        if not area_size_m or not zoom:
-            logger.info("⚠️  Missing area_size_m or zoom arguments for satellite image download.")
+        if not area_size or not zoom:
+            logger.info("⚠️  Missing area_size or zoom arguments for satellite image download.")
             return False
         else:
             logger.info("🛰️  Downloading satellite imagery ...")
 
-            downloader = satelliteTileDownloader(lat, lon, area_size_m, zoom, self.working_dir)
+            downloader = satelliteTileDownloader(lat, lon, area_size, zoom, self.working_dir)
 
             result = downloader.run_pipeline()
             return result
@@ -333,6 +333,7 @@ class PipelineProcessor:
         render_path = os.path.join(self.working_dir, "images", "top_view.png")
         output_path = os.path.join(self.working_dir, "transformation.txt")
         database_path = os.path.join(self.working_dir, "results_loftr_bruteforce_quality_medium", "database.db")
+        # database_path = os.path.join(self.working_dir, "results_loftr_bruteforce_quality_high", "database.db")
 
         self.rotate_image(render_path)
         self.create_scaled_versions(ortho_path)
@@ -340,20 +341,19 @@ class PipelineProcessor:
         # First command: Deep Image Matching
         dim_cmd_1 = [
             "python3", "demo.py",
-            # "-p", "se2loftr",
             "-p", "loftr",
-            "-t", "none",
+            "-t", "none", # none, exhaustive or preselection
             "-s", "bruteforce",
             "--force",
             "--skip_reconstruction",
-            "-q", "medium",
+            "-q", "medium", # medium or high
             "-V",
             "-d", self.working_dir
         ]
         subprocess.run(dim_cmd_1, capture_output=True, text=True, cwd="/workspace/dim")
 
         # Second command: Deep Image Matching
-        processor = georef_dim(ortho_path, render_path, output_path, database_path)
+        processor = georef_dim(ortho_path, render_path, output_path, database_path, debug=True)
         processor.run_pipeline()
 
 
@@ -520,7 +520,7 @@ class PipelineProcessor:
 
             elif mapbox_key:
                 logger.info("--> Downloading satellite imagery using MAPBOX API")
-                if self.download_satellite_imagery(lat, lon, self.args.area_size_m, self.args.zoom):
+                if self.download_satellite_imagery(lat, lon, self.args.area_size, self.args.zoom):
                     self.move_images_to_subfolder()
                     self.run_deep_image_matching_and_georef(self.base_name)
                     self.apply_transform(lat, lon)

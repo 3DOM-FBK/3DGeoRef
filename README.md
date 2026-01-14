@@ -19,6 +19,8 @@
 - [Module Documentation](#module-documentation)
 - [Requirements](#requirements)
 - [License](#license)
+- [Future Updates](#future-updates)
+
 
 ---
 
@@ -159,6 +161,7 @@ docker run --rm -it \
   --gpus all \
   -v $(pwd):/app \
   -v /path/to/data:/data \
+  -e MAPBOX_API_KEY=your_mapbox_api_key \
   3dgeoref:latest \
   python main.py \
     -i /data/input/building.obj \
@@ -383,6 +386,14 @@ See `Dockerfile` for complete list. Key dependencies:
 This project is developed by **3DOM-FBK** (Fondazione Bruno Kessler, 3D Optical Metrology unit).
 
 For licensing information, please contact the authors.
+
+---
+
+## Future Updates
+
+- **Improved Elevation Alignment**: Refine the elevation application to the 3D model for better integration with Cesium. This involves addressing potential discrepancies between ellipsoidal and geodetic height formats when fetching data from OpenTopoData.
+- **Support for Multiple 3D Formats**: Extend the input pipeline to support various 3D formats, specifically point clouds. Currently, the pipeline is optimized for GLB models.
+- **AI-driven Scale Prediction**: Utilize Gemini or similar multimodal models to estimate the real-world scale of the 3D model and automatically adjust synthetic renderings to match the correct spatial resolution - This can help DIM step
 
 ---
 

@@ -10,7 +10,7 @@ def parse_args():
     parser.add_argument("-o", "--output_folder", required=True, help="Folder to save outputs")
     parser.add_argument("--streetviews", type=str, default="5", help="Number of streetview-style renderings around the model (default: 5)")
     parser.add_argument("--nr_prediction", type=str, default="1", help="Number of gps prediction (default: 1) - GeoClip only")
-    parser.add_argument("--area_size_m", type=str, default="500", help="Side length of the square area to download (in meters).")
+    parser.add_argument("--area_size", type=str, default="500", help="Side length of the square area to download.")
     parser.add_argument("--zoom", type=str, default="18", help="Zoom level (e.g., 18 or 20).")
     parser.add_argument("--lat", type=str, default=None, help="Latitude of 3d model")
     parser.add_argument("--lon", type=str, default=None, help="Longitude of 3d mode")

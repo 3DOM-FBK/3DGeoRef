@@ -213,7 +213,9 @@ def render_top_ortho_view_from_meshes(output_path, margin=1, pixel_density=100, 
     res_x = int(res_x * scale_factor)
     res_y = int(res_y * scale_factor)
 
-    ortho_scale = max(size_x, size_y)
+    # If we force VERTICAL sensor fit, ortho_scale MUST be the height (size_y)
+    # The width (size_x) will be correctly covered due to the aspect ratio of the resolution
+    ortho_scale = size_y
 
     scene = bpy.context.scene
     render = scene.render
@@ -223,15 +225,20 @@ def render_top_ortho_view_from_meshes(output_path, margin=1, pixel_density=100, 
 
     cam_data = bpy.data.cameras.new("OrthoCam")
     cam_data.type = 'ORTHO'
+    cam_data.sensor_fit = 'VERTICAL'
     cam_data.ortho_scale = ortho_scale
 
     cam = bpy.data.objects.new("OrthoCam", cam_data)
     bpy.context.scene.collection.objects.link(cam)
 
-    cam_data.clip_start = 0.01
-    cam_data.clip_end = 10000.0
+    cam_data.clip_start = 0.1
+    # Ensure clip_end covers the entire height of the model plus the safety margin
+    cam_data.clip_end = size.z + 100.0
 
-    cam.location = center + mathutils.Vector((0, 0, 10))
+    # Position camera above the highest point of the model
+    # Use bbox_max.z + margin instead of center.z + 10
+    _, _, bbox_max, _ = get_combined_bounding_box(meshes)
+    cam.location = center.x, center.y, bbox_max.z + 10.0
     cam.rotation_euler = (0, 0, 0)
     bpy.context.scene.camera = cam
 
@@ -388,6 +395,7 @@ def setup_hdri_lighting(hdri_path):
 def ortho_camera_corners(cam_obj, scene=None):
     """
     Computes the world-space coordinates of the four corners of an orthographic camera's view.
+    Handles Blender's sensor_fit behavior where ortho_scale might refer to width or height.
 
     Args:
         cam_obj (bpy.types.Object): The orthographic camera object.
@@ -407,9 +415,23 @@ def ortho_camera_corners(cam_obj, scene=None):
     
     assert cam_data.type == 'ORTHO', "Camera must be ortho"
     
-    aspect_ratio = render.resolution_x / render.resolution_y
-    height = cam_data.ortho_scale
-    width = cam_data.ortho_scale * aspect_ratio
+    # Calculate aspect ratio including pixel aspect
+    aspect_ratio = (render.resolution_x * render.pixel_aspect_x) / (render.resolution_y * render.pixel_aspect_y)
+    
+    # Determine horizontal and vertical spans based on Blender's sensor_fit
+    if cam_data.sensor_fit == 'HORIZONTAL':
+        width = cam_data.ortho_scale
+        height = cam_data.ortho_scale / aspect_ratio
+    elif cam_data.sensor_fit == 'VERTICAL':
+        height = cam_data.ortho_scale
+        width = cam_data.ortho_scale * aspect_ratio
+    else: # 'AUTO'
+        if aspect_ratio >= 1.0: # Landscape or Square
+            width = cam_data.ortho_scale
+            height = cam_data.ortho_scale / aspect_ratio
+        else: # Portrait
+            height = cam_data.ortho_scale
+            width = cam_data.ortho_scale * aspect_ratio
 
     corners_cam = [
         mathutils.Vector((-width/2, -height/2, 0)),
@@ -451,10 +473,10 @@ def postprocess_model(output_path, filename, corners_world, target_x):
         obj.data.transform(translation_matrix)
         obj.data.update()
     
-    # Calculate scale factor
-    _, _, bbox_max, bbox_min = get_combined_bounding_box(meshes)
-    size_x = bbox_max[0] - bbox_min[0]
-    scale_fact = target_x / size_x
+    # Calculate scale factor based on camera view width to ensure 1 unit = 1 pixel
+    # corners_world[1] is bottom-right, corners_world[0] is bottom-left
+    view_width = (corners_world[1] - corners_world[0]).length
+    scale_fact = target_x / view_width
     
     # Calculate scale matrix
     scale_matrix = mathutils.Matrix.Scale(scale_fact, 4)
@@ -581,8 +603,8 @@ if __name__ == "__main__":
 
     obj = import_model(input_file)
 
-    # Controlla se l'oggetto importato è una nuvola di punti - to do...
-    check_point_cloud(obj)
+    # Check if the imported object is a point cloud - to do...
+    # check_point_cloud(obj)
 
     apply_transformations(obj)
     res_x, res_y = render_top_ortho_view_from_meshes(os.path.join(output_folder, 'top_view'))

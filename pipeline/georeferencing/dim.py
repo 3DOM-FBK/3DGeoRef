@@ -195,8 +195,8 @@ class georef_dim():
 
 
 # if __name__ == "__main__":
-#     working_dir = "/tmp/torreEiffel"
-#     base_name = "torreEiffel"
+#     working_dir = "/tmp/8ce20ac5fc3a4af7ab223cdc0caa7d27"
+#     base_name = "8ce20ac5fc3a4af7ab223cdc0caa7d27"
 #     ortho_path = os.path.join(working_dir, "images", base_name + ".tif")
 #     render_path = os.path.join(working_dir, "images", "top_view.png")
 #     output_path = os.path.join(working_dir, "transformation.txt")

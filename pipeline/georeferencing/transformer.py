@@ -14,6 +14,8 @@ from typing import Tuple, Dict, Optional, Union
 import numpy as np
 import trimesh
 import requests
+import rasterio
+from rasterio.transform import Affine
 from pyproj import Transformer
 
 
@@ -462,8 +464,6 @@ class GeoTransformer:
         S[0, 0] = S[1, 1] = S[2, 2] = mean_scale
         
         matrix_dim = T @ R @ S
-
-        print (f"--> Scale: {mean_scale}")
         
         # Step 4: Apply transformation
         ModelAnalyzer.apply_transform(model, matrix_dim)
@@ -474,6 +474,9 @@ class GeoTransformer:
         
         # Step 5: Calculate model center
         midpoint, centroid = ModelAnalyzer.get_centroid_and_midpoint(model)
+
+        print (f"--> Midpoint: {midpoint}")
+        print (f"--> Centroid: {centroid}")
         
         # Step 6: Get elevation
         elevation, lon, lat = self._get_elevation_at_model_midpoint(midpoint)
@@ -484,8 +487,6 @@ class GeoTransformer:
         
         # Step 8: Apply Web Mercator scale correction
         scale_factor = self.compute_web_mercator_scale_factor(self.lat)
-
-        # print (f"--> Scale factor: {scale_factor}")
         
         scale_matrix = np.eye(4)
         scale_matrix[0, 0] = scale_matrix[1, 1] = scale_matrix[2, 2] = 1 / scale_factor
@@ -527,12 +528,12 @@ class GeoTransformer:
         
         return True
 
-if __name__ == "__main__":
-    gt = GeoTransformer(
-        working_dir="/tmp/colosseo/",
-        input_file="/data/input/colosseo.glb",
-        output_folder="/data/output/",
-        lat="41.889732",
-        lon="12.491350"
-    )
-    gt.run()
+# if __name__ == "__main__":
+#     gt = GeoTransformer(
+#         working_dir="/tmp/1d936fe09cc64376802b196157a73d16/",
+#         input_file="/data/input/paper_january/1d936fe09cc64376802b196157a73d16.glb",
+#         output_folder="/data/output/debug_tmp/",
+#         lat="41.9022",
+#         lon="12.4578"
+#     )
+#     gt.run()
