@@ -148,7 +148,7 @@ docker run --rm -it \
     -o /data/output \
     --geoloc_model gemini \
     --streetviews 8 \
-    --area_size_m 500 \
+    --area_size 500 \
     --zoom 18
 ```
 
@@ -186,7 +186,7 @@ docker run --rm -it \
     --mode dim \
     --lat 46.0669 \
     --lon 11.1216 \
-    --area_size_m 300 \
+    --area_size 300 \
     --zoom 20
 ```
 
@@ -250,7 +250,7 @@ python main.py -i /data/input/test.glb -o /data/output --mode geoloc
 | `-o, --output_folder` | str | *required* | Output folder for results |
 | `--streetviews` | int | 5 | Number of street-view style renderings around the model |
 | `--nr_prediction` | int | 1 | Number of GPS predictions (GeoCLIP only) |
-| `--area_size_m` | int | 500 | Side length of square area to download (meters) |
+| `--area_size` | int | 500 | Side length of square area to download (meters) |
 | `--zoom` | int | 18 | Satellite imagery zoom level (18-20 recommended) |
 | `--lat` | float | None | Manual latitude (skips geolocation if provided with --lon) |
 | `--lon` | float | None | Manual longitude (skips geolocation if provided with --lat) |
