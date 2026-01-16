@@ -474,9 +474,6 @@ class GeoTransformer:
         
         # Step 5: Calculate model center
         midpoint, centroid = ModelAnalyzer.get_centroid_and_midpoint(model)
-
-        print (f"--> Midpoint: {midpoint}")
-        print (f"--> Centroid: {centroid}")
         
         # Step 6: Get elevation
         elevation, lon, lat = self._get_elevation_at_model_midpoint(midpoint)

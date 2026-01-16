@@ -20,6 +20,7 @@
 - [Requirements](#requirements)
 - [License](#license)
 - [Future Updates](#future-updates)
+- [Changelog](#changelog)
 
 
 ---
@@ -393,7 +394,15 @@ For licensing information, please contact the authors.
 
 - **Improved Elevation Alignment**: Refine the elevation application to the 3D model for better integration with Cesium. This involves addressing potential discrepancies between ellipsoidal and geodetic height formats when fetching data from OpenTopoData.
 - **Support for Multiple 3D Formats**: Extend the input pipeline to support various 3D formats, specifically point clouds. Currently, the pipeline is optimized for GLB models.
-- **AI-driven Scale Prediction**: Utilize Gemini or similar multimodal models to estimate the real-world scale of the 3D model and automatically adjust synthetic renderings to match the correct spatial resolution - This can help DIM step
+
+---
+
+## Changelog
+
+### 2026-01-16
+
+- **Image Matching Improvement**: Integrated the usage of SuperPoint+SuperGlue combined with LoFTR in the Deep Image Matching (DIM) step for more robust feature correspondence.
+- **Nadir Dimension Estimation**: Implemented automatic estimation of the nadir image dimensions using the Gemini model.
 
 ---
 

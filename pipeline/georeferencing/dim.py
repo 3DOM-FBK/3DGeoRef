@@ -10,7 +10,7 @@ from pathlib import Path
 
 class georef_dim():
 
-    def __init__(self, ortho_path, render_path, output_path, database_path, debug=True):
+    def __init__(self, ortho_path, render_path, output_path, database_path, debug=False):
         self.ortho_path = Path(ortho_path)
         self.render_path = Path(render_path)
         self.output_path = Path(output_path)
@@ -60,7 +60,7 @@ class georef_dim():
         # Select the pair with the maximum inlier matches
         best_index = int(np.argmax(all_matches))
 
-        print (f"Selected pair: '{all_pairs[best_index][0]}' and '{all_pairs[best_index][1]}'")
+        # print (f"Selected pair: '{all_pairs[best_index][0]}' and '{all_pairs[best_index][1]}'")
 
         return all_pairs[best_index]
 

@@ -6,6 +6,10 @@ from google.genai.types import GenerateContentConfig
 from collections import Counter
 import time
 
+# DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
+# DEFAULT_MODEL = "gemini-3-flash-preview"
+
 # 1. Configuration and Initialization
 # Make sure the GEMINI_API_KEY environment variable is set.
 
@@ -16,7 +20,7 @@ class GeminiGeolocator:
     and returns GPS coordinates with the highest possible precision.
     """
 
-    def __init__(self, exclude_keywords=None, model_name: str = "gemini-3-flash-preview", delay_seconds: float = 15.0):
+    def __init__(self, exclude_keywords=None, model_name: str = DEFAULT_MODEL, delay_seconds: float = 15.0):
         """
         Initializes the GeminiGeolocator client and configuration.
         
@@ -142,3 +146,78 @@ class GeminiGeolocator:
         most_common = counter.most_common(1)[0][0] if counter else None
 
         return most_common, counter
+
+
+class GeminiDimensionEstimator:
+    """
+    A class to estimate the dimensions of the area present in an image using Google's Gemini model.
+    """
+
+    def __init__(self, model_name: str = DEFAULT_MODEL):
+        """
+        Initializes the GeminiDimensionEstimator client and configuration.
+
+        Args:
+            model_name: The Gemini model to use for estimation.
+        """
+        try:
+            self.client = genai.Client()
+        except Exception as e:
+            raise RuntimeError(
+                f"Error initializing Gemini client: {e}. "
+                "Make sure the GEMINI_API_KEY environment variable is set."
+            )
+
+        self.model_name = model_name
+        self.system_prompt = (
+            "You are an expert in spatial analysis and image photogrammetry. "
+            "Your task is to analyze images to estimate the physical scale and dimensions of the scene. "
+            "Use visual cues such as objects with standard sizes (cars, road lanes, doors, people), "
+            "perspective, and depth of field to calculate the size of the area shown."
+        )
+        self.user_prompt = (
+             "Analyze the provided image to estimate the physical width of the captured area in meters. "
+             "Focus specifically on the width of the visible scene. "
+             "Return the result locally in JSON format like this: {\"dimension_meters\": <float_value>}. "
+             "Ensure the value is a float representing the width in meters. Return only the JSON."
+             "Example: {\"dimension_meters\": 25.5}"
+        )
+
+    def estimate_dimension(self, image_path: str) -> float:
+        """
+        Estimates the dimension (in meters) of the zone present in the image.
+
+        Args:
+            image_path: Path to the image to analyze.
+
+        Returns:
+            float: The estimated dimension in meters. Returns None if estimation fails.
+        """
+        try:
+            img = Image.open(image_path)
+            
+            config = GenerateContentConfig(
+                system_instruction=self.system_prompt,
+                response_mime_type="application/json",
+            )
+
+            contents = [img, self.user_prompt]
+
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=config,
+            )
+
+            try:
+                result = json.loads(response.text.strip())
+                val = result.get("dimension_meters")
+                if val is not None:
+                     return float(val)
+                return None
+            except (json.JSONDecodeError, ValueError, TypeError):
+                 return None
+
+        except Exception as e:
+            print(f"Error estimating dimension: {e}")
+            return None
