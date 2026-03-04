@@ -15,6 +15,12 @@ def parse_args():
     parser.add_argument("--lat", type=str, default=None, help="Latitude of 3d model")
     parser.add_argument("--lon", type=str, default=None, help="Longitude of 3d mode")
     parser.add_argument("--ortho", type=str, default=None, help="Orthophoto image to use for georeferencing")
+    parser.add_argument(
+        "--use_dino",
+        action="store_true",
+        default=False,
+        help="Enable DINO-based image alignment before Deep Image Matching (default: disabled)"
+    )
 
     parser.add_argument(
         "--mode",
@@ -36,6 +42,34 @@ def parse_args():
             "'geoclip' = use GeoCLIP model, "
             "'ollama' = use Ollama AI model, "
             "'gemini' = use Gemini AI model (default)"
+    )
+
+    parser.add_argument(
+        "--gemini_model",
+        type=str,
+        default="gemini-2-5-flash",
+        help="Gemini model version to use (e.g., 'gemini-3-flash', 'gemini-2.5-flash' ...)."
+    )
+
+    parser.add_argument(
+        "--gemini_api_key",
+        type=str,
+        default=None,
+        help="API Key for Google Gemini (can also be set via GEMINI_API_KEY environment variable)."
+    )
+
+    parser.add_argument(
+        "--mapbox_api_key",
+        type=str,
+        default=None,
+        help="API Key for Mapbox (can also be set via MAPBOX_API_KEY environment variable)."
+    )
+
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        default=False,
+        help="Delete temporary working directory in /tmp after execution (default: keep)."
     )
     
     return parser.parse_args()

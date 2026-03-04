@@ -16,7 +16,7 @@ import trimesh
 import requests
 import rasterio
 from rasterio.transform import Affine
-from pyproj import Transformer
+from pyproj import Transformer, CRS
 
 
 # Configure logging
@@ -195,6 +195,139 @@ class ElevationService:
             logger.error(f"❌ GeoRef_utils.py - Failed to fetch elevation: {e}")
             return 0
 
+
+class GeoidConverter:
+    """
+    Utility class for converting between geoid (orthometric) and ellipsoid heights.
+    
+    OpenTopoData returns orthometric heights (referenced to the geoid/mean sea level).
+    Cesium and WGS84 use ellipsoid heights. The difference is the geoid undulation (N).
+    
+    Formula: h_ellipsoid = H_orthometric + N
+    Where N is the geoid undulation (geoid height above the ellipsoid).
+    """
+    
+    # EGM96 geoid grid file (must be available in PROJ data directory)
+    GEOID_GRID = "egm96_15.gtx"
+    
+    @staticmethod
+    def get_geoid_undulation(lat: float, lon: float) -> float:
+        """
+        Get the geoid undulation (N) at given coordinates using EGM96 model.
+        
+        The geoid undulation is the height of the geoid above the WGS84 ellipsoid.
+        Positive values mean geoid is above ellipsoid, negative means below.
+        
+        Args:
+            lat: Latitude in degrees
+            lon: Longitude in degrees
+            
+        Returns:
+            Geoid undulation N in meters
+        """
+        try:
+            # Create CRS with geoid correction
+            # EPSG:4326 = WGS84 geographic (lat/lon)
+            # EPSG:4326+5773 = WGS84 + EGM96 geoid height
+            crs_wgs84_2d = CRS.from_epsg(4326)
+            
+            # WGS84 3D with ellipsoid height
+            crs_wgs84_3d = CRS.from_epsg(4979)
+            
+            # Compound CRS: WGS84 geographic + EGM96 geoid height
+            # This represents coordinates with orthometric height
+            crs_geoid = CRS.compound_crs([
+                CRS.from_epsg(4326),  # WGS84 geographic 2D
+                CRS.from_epsg(5773)   # EGM96 geoid height
+            ])
+            
+            # Create transformer from geoid to ellipsoid heights
+            transformer = Transformer.from_crs(
+                crs_geoid,     # Source: orthometric (geoid-based)
+                crs_wgs84_3d,  # Target: ellipsoid height
+                always_xy=True
+            )
+            
+            # Transform with zero orthometric height to get the geoid undulation
+            # Output is (lon, lat, ellipsoid_height) where h_ellipsoid = 0 + N = N
+            _, _, geoid_undulation = transformer.transform(lon, lat, 0.0)
+            
+            logger.debug(f"Geoid undulation at ({lat}, {lon}): {geoid_undulation:.3f}m")
+            return geoid_undulation
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to compute geoid undulation via PROJ: {e}")
+            logger.info("Falling back to approximate EGM96 lookup...")
+            return GeoidConverter._approximate_geoid_undulation(lat, lon)
+    
+    @staticmethod
+    def _approximate_geoid_undulation(lat: float, lon: float) -> float:
+        """
+        Approximate geoid undulation for common regions when PROJ grids unavailable.
+        
+        This is a rough approximation based on regional averages.
+        For accurate results, install PROJ datum grids.
+        
+        Args:
+            lat: Latitude in degrees
+            lon: Longitude in degrees
+            
+        Returns:
+            Approximate geoid undulation in meters
+        """
+        # Very rough regional approximations (for fallback only)
+        # Europe
+        if 35 <= lat <= 72 and -10 <= lon <= 40:
+            return 45.0  # Average for Europe ~30-60m
+        # North America
+        elif 25 <= lat <= 55 and -130 <= lon <= -60:
+            return -30.0  # Average for continental US
+        # Asia
+        elif 10 <= lat <= 55 and 60 <= lon <= 150:
+            return -20.0  # Very rough average
+        # Default global average
+        else:
+            logger.warning("Using global average geoid undulation (0m) - results may be inaccurate")
+            return 0.0
+    
+    @staticmethod
+    def orthometric_to_ellipsoid(lat: float, lon: float, orthometric_height: float) -> float:
+        """
+        Convert orthometric height (geoid-based) to ellipsoid height.
+        
+        Args:
+            lat: Latitude in degrees
+            lon: Longitude in degrees
+            orthometric_height: Height above the geoid (from OpenTopoData, DEMs, etc.)
+            
+        Returns:
+            Ellipsoid height (suitable for WGS84/Cesium)
+        """
+        N = GeoidConverter.get_geoid_undulation(lat, lon)
+        ellipsoid_height = orthometric_height + N
+        
+        logger.info(f"Height conversion: {orthometric_height:.2f}m (orthometric) + "
+                   f"{N:.2f}m (geoid) = {ellipsoid_height:.2f}m (ellipsoid)")
+        
+        return ellipsoid_height
+    
+    @staticmethod
+    def ellipsoid_to_orthometric(lat: float, lon: float, ellipsoid_height: float) -> float:
+        """
+        Convert ellipsoid height to orthometric height (geoid-based).
+        
+        Args:
+            lat: Latitude in degrees
+            lon: Longitude in degrees
+            ellipsoid_height: Height above the WGS84 ellipsoid
+            
+        Returns:
+            Orthometric height (height above mean sea level/geoid)
+        """
+        N = GeoidConverter.get_geoid_undulation(lat, lon)
+        orthometric_height = ellipsoid_height - N
+        
+        return orthometric_height
 
 
 class ModelAnalyzer:
@@ -468,9 +601,9 @@ class GeoTransformer:
         # Step 4: Apply transformation
         ModelAnalyzer.apply_transform(model, matrix_dim)
 
-        # Step 4.5: Save scaled model
-        scaled_model_path = os.path.join(self.output_folder, f"{self.basename}_dim.obj")
-        model.export(scaled_model_path, file_type="obj", include_texture=False)
+        # # Step 4.5: Save scaled model
+        # scaled_model_path = os.path.join(self.output_folder, f"{self.basename}_dim.obj")
+        # model.export(scaled_model_path, file_type="obj", include_texture=False)
         
         # Step 5: Calculate model center
         midpoint, centroid = ModelAnalyzer.get_centroid_and_midpoint(model)
@@ -500,8 +633,10 @@ class GeoTransformer:
         # Step 11: Export georeferenced model
         output_path = os.path.join(self.output_folder, f"{self.basename}_georef.glb")
 
-        # Step 12: Apply elevation to model
-        # TO DO...
+        # Step 12: Convert elevation from orthometric (geoid) to ellipsoid height
+        # OpenTopoData returns orthometric height, Cesium needs ellipsoid height
+        elevation_ellipsoid = GeoidConverter.orthometric_to_ellipsoid(lat, lon, elevation)
+        logger.info(f"🏔️ Elevation converted: {elevation:.2f}m (orthometric) → {elevation_ellipsoid:.2f}m (ellipsoid)")
         
         try:
             model.export(output_path, file_type="glb")
@@ -521,16 +656,6 @@ class GeoTransformer:
                 'T_blender_to_trimesh': T_blender_to_trimesh,
                 'blender_matrix': blender_matrix
             }
-            self._export_heritage_data(matrices, elevation, lon, lat)
+            self._export_heritage_data(matrices, elevation_ellipsoid, lon, lat)
         
         return True
-
-# if __name__ == "__main__":
-#     gt = GeoTransformer(
-#         working_dir="/tmp/1d936fe09cc64376802b196157a73d16/",
-#         input_file="/data/input/paper_january/1d936fe09cc64376802b196157a73d16.glb",
-#         output_folder="/data/output/debug_tmp/",
-#         lat="41.9022",
-#         lon="12.4578"
-#     )
-#     gt.run()

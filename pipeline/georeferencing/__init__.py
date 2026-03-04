@@ -8,17 +8,22 @@ This module provides georeferencing functionality for 3D models, including:
 """
 
 from .dim import georef_dim
+from .dino import DinoImageMatcher, OrthoCropper
 from .transformer import (
     MatrixUtils,
     ElevationService,
+    GeoidConverter,
     ModelAnalyzer,
     GeoTransformer
 )
 
 __all__ = [
     'georef_dim',
+    'DinoImageMatcher',
+    'OrthoCropper',
     'MatrixUtils',
     'ElevationService',
+    'GeoidConverter',
     'ModelAnalyzer',
     'GeoTransformer',
 ]

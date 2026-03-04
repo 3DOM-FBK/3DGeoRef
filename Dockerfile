@@ -53,7 +53,7 @@ RUN git clone https://github.com/3DOM-FBK/deep-image-matching.git /workspace/dim
 WORKDIR /workspace/dim
 RUN git checkout dev
 
-# attiva parse_cli nel demo.py
+# Activate parse_cli in demo.py
 RUN sed -i 's|# from deep_image_matching.parser import parse_cli|from deep_image_matching.parser import parse_cli|' demo.py && \
     sed -i 's|# args = parse_cli()|args = parse_cli()|' demo.py
 
@@ -71,3 +71,5 @@ WORKDIR /app
 COPY pipeline/ /app/pipeline/
 COPY hdri/ /app/hdri/
 COPY main.py /app/main.py
+
+ENTRYPOINT [ "python3", "main.py" ]

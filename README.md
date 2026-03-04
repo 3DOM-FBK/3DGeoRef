@@ -104,15 +104,17 @@ The easiest way to run **3DGeoRef** is using Docker, which provides a pre-config
 git clone https://github.com/3DOM-FBK/3DGeoRef.git
 cd 3DGeoRef
 
-# Build the Docker image
-docker build -t 3dgeoref:latest .
+# Pull the pre-built Docker image
+docker pull 3domfbk/3d-georef:04032026
+
+# Or build the Docker image locally
+docker build -t 3domfbk/3d-georef:04032026 .
 
 # Run the container interactively
 docker run --rm -it \
   --gpus all \
-  -v $(pwd):/app \
   -v /path/to/your/data:/data \
-  3dgeoref:latest bash
+  3domfbk/3d-georef:04032026 bash
 ```
 
 ---
@@ -139,15 +141,15 @@ Process a 3D model with automatic geolocation using Gemini AI:
 ```bash
 docker run --rm -it \
   --gpus all \
-  -v $(pwd):/app \
   -v /path/to/data:/data \
-  -e GOOGLE_API_KEY=your_gemini_api_key \
-  -e MAPBOX_API_KEY=your_mapbox_api_key \
-  3dgeoref:latest \
-  python main.py \
+  3domfbk/3d-georef:04032026 \
     -i /data/input/model.glb \
     -o /data/output \
     --geoloc_model gemini \
+    --gemini_model gemini-2.5-flash \
+    --gemini_api_key "YOUR_GEMINI_API_KEY" \
+    --mapbox_api_key "YOUR_MAPBOX_API_KEY" \
+    --cleanup \
     --streetviews 8 \
     --area_size 500 \
     --zoom 18
@@ -160,15 +162,13 @@ Use the GeoCLIP model for faster geolocation (no API key required):
 ```bash
 docker run --rm -it \
   --gpus all \
-  -v $(pwd):/app \
   -v /path/to/data:/data \
-  -e MAPBOX_API_KEY=your_mapbox_api_key \
-  3dgeoref:latest \
-  python main.py \
-    -i /data/input/building.obj \
+  3domfbk/3d-georef:04032026 \
+    -i /data/input/building.glb \
     -o /data/output \
     --geoloc_model geoclip \
-    --nr_prediction 3
+    --nr_prediction 3 \
+    --cleanup
 ```
 
 #### Example 3: Manual Coordinates with DIM Mode
@@ -178,15 +178,14 @@ Skip geolocation and run only Deep Image Matching with known coordinates:
 ```bash
 docker run --rm -it \
   --gpus all \
-  -v $(pwd):/app \
   -v /path/to/data:/data \
-  3dgeoref:latest \
-  python main.py \
-    -i /data/input/monument.ply \
+  3domfbk/3d-georef:04032026 \
+    -i /data/input/monument.glb \
     -o /data/output \
     --mode dim \
     --lat 46.0669 \
     --lon 11.1216 \
+    --mapbox_api_key "YOUR_MAPBOX_API_KEY" \
     --area_size 300 \
     --zoom 20
 ```
@@ -198,11 +197,9 @@ Use your own orthophoto instead of downloading satellite imagery:
 ```bash
 docker run --rm -it \
   --gpus all \
-  -v $(pwd):/app \
   -v /path/to/data:/data \
-  3dgeoref:latest \
-  python main.py \
-    -i /data/input/site.fbx \
+  3domfbk/3d-georef:04032026 \
+    -i /data/input/site.glb \
     -o /data/output \
     --ortho /data/orthophoto.tif \
     --lat 48.8582 \
@@ -234,10 +231,8 @@ Run the container interactively for development and debugging:
 ```bash
 docker run --rm -it \
   --gpus all \
-  -v $(pwd):/app \
   -v /path/to/data:/data \
-  --entrypoint bash \
-  3dgeoref:latest
+  3domfbk/3d-georef:04032026
 
 # Inside the container, you can run commands manually:
 python main.py -i /data/input/test.glb -o /data/output --mode geoloc
@@ -258,6 +253,10 @@ python main.py -i /data/input/test.glb -o /data/output --mode geoloc
 | `--ortho` | str | None | Path to custom orthophoto (skips satellite download) |
 | `--mode` | str | auto | Execution mode: `auto`, `geoloc`, or `dim` |
 | `--geoloc_model` | str | gemini | Geolocation model: `geoclip`, `ollama`, or `gemini` |
+| `--gemini_model` | str | gemini-2.5-flash | Gemini model version to use |
+| `--gemini_api_key` | str | None | API Key for Google Gemini (can also be set via env var) |
+| `--mapbox_api_key` | str | None | API Key for Mapbox (can also be set via env var) |
+| `--cleanup` | bool | False | Delete temporary working directory in /tmp after execution |
 
 ### Execution Modes
 

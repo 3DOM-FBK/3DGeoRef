@@ -13,7 +13,7 @@ from PIL import Image
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
 from pipeline.services import satelliteTileDownloader
-from pipeline.georeferencing import georef_dim, GeoTransformer, ElevationService
+from pipeline.georeferencing import georef_dim, GeoTransformer, ElevationService, DinoImageMatcher, OrthoCropper
 
 # Logger configuration
 LOG_LEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
@@ -60,6 +60,12 @@ class PipelineProcessor:
         
         # Ensure working directory exists
         os.makedirs(self.working_dir, exist_ok=True)
+
+        # Set API keys as environment variables if provided in args
+        if getattr(self.args, "gemini_api_key", None):
+            os.environ["GEMINI_API_KEY"] = self.args.gemini_api_key
+        if getattr(self.args, "mapbox_api_key", None):
+            os.environ["MAPBOX_API_KEY"] = self.args.mapbox_api_key
         
         logger.info("Pipeline initialized.")
         logger.info(f"  Input File: {args.input_file}")
@@ -147,7 +153,7 @@ class PipelineProcessor:
 
         try:
             from pipeline.geolocation.gemini import GeminiDimensionEstimator
-            estimator = GeminiDimensionEstimator()
+            estimator = GeminiDimensionEstimator(model_name=self.args.gemini_model)
             dimension = estimator.estimate_dimension(top_view_path)
             
             if dimension:
@@ -249,7 +255,7 @@ class PipelineProcessor:
                 
             else: # gemini
                 from pipeline.geolocation.gemini import GeminiGeolocator
-                predictor = GeminiGeolocator()
+                predictor = GeminiGeolocator(model_name=self.args.gemini_model)
                 most_common, _ = predictor.run_pipeline(self.working_dir)
 
             # Cleanup
@@ -335,6 +341,57 @@ class PipelineProcessor:
         ortho_path = os.path.join(self.working_dir, "images", self.base_name + ".tif")
         render_path = os.path.join(self.working_dir, "images", "top_view.png")
         output_matrix_path = os.path.join(self.working_dir, "transformation.txt")
+
+        # RUN Luca's DINO script (if enabled)
+        use_dino = getattr(self.args, "use_dino", False)
+        
+        if use_dino:
+            images_dir = os.path.join(self.working_dir, "images")
+            if os.path.isdir(images_dir):
+                try:
+                    dino_matcher = DinoImageMatcher(dino_version="v2", downscale_factor=1.0)
+                    
+                    # Find the ortho (base image) and render (template) in the images directory
+                    ortho_in_dir = os.path.join(images_dir, self.base_name + ".tif")
+                    render_in_dir = os.path.join(images_dir, "top_view.png")
+                    
+                    if os.path.exists(ortho_in_dir) and os.path.exists(render_in_dir):
+                        logger.info(f"🦕 Running DINO matching on images in {images_dir}")
+                        dino_output_dir = os.path.join(self.working_dir, "dino_results")
+                        center_row, center_col = dino_matcher.match(
+                            base_image_path=ortho_in_dir,
+                            template_image_path=render_in_dir,
+                            output_dir=dino_output_dir
+                        )
+                        logger.info(f"✅ DINO match completed: center=({center_row:.2f}, {center_col:.2f})")
+
+                        # Crop the orthophoto centered on the DINO match position
+                        logger.info("✂️ Cropping orthophoto based on DINO match...")
+                        cropper = OrthoCropper(scale_factor=2.0)
+                        cropped_ortho_path = cropper.crop(
+                            ortho_path=ortho_in_dir,
+                            reference_image_path=render_in_dir,
+                            center_row=center_row,
+                            center_col=center_col,
+                            output_path=os.path.join(images_dir, f"{self.base_name}_cropped.tif")
+                        )
+                        
+                        # Remove original ortho and rename cropped to original name for pipeline continuity
+                        os.remove(ortho_in_dir)
+                        shutil.move(cropped_ortho_path, ortho_in_dir)
+                        
+                        del cropper
+                    else:
+                        logger.warning(f"⚠️ DINO: Required images not found in {images_dir}")
+                        
+                    del dino_matcher
+                    self._free_memory()
+                except Exception as e:
+                    logger.error(f"❌ DINO matching/cropping failed: {e}")
+            else:
+                logger.warning(f"⚠️ Images directory not found: {images_dir}")
+        else:
+            logger.debug("DINO matching disabled (use --use_dino to enable)")
 
         # Prepare image variants
         self._rotate_image_variants(render_path)
@@ -427,14 +484,24 @@ class PipelineProcessor:
             except Exception as e:
                 logger.error(f"❌ Failed to copy orthophoto: {e}")
 
-        # Backup Working Directory - Temporary
-        try:
-            backup_path = os.path.join(self.args.output_folder, self.base_name, "working_dir_backup")
-            if os.path.exists(self.working_dir):
-                shutil.copytree(self.working_dir, backup_path, dirs_exist_ok=True)
-                logger.info(f"✅ Temporary working directory backed up to: {backup_path}")
-        except Exception as e:
-            logger.error(f"❌ Failed to backup temporary directory: {e}")
+        # # Backup Working Directory - Temporary
+        # try:
+        #     backup_path = os.path.join(self.args.output_folder, self.base_name, "working_dir_backup")
+        #     if os.path.exists(self.working_dir):
+        #         shutil.copytree(self.working_dir, backup_path, dirs_exist_ok=True)
+        #         logger.info(f"✅ Temporary working directory backed up to: {backup_path}")
+        # except Exception as e:
+        #     logger.error(f"❌ Failed to backup temporary directory: {e}")
+
+        # Cleanup Temporary Working Directory
+        if getattr(self.args, "cleanup", False):
+            try:
+                if os.path.exists(self.working_dir):
+                    logger.info(f"🧹 Cleaning up temporary directory: {self.working_dir}")
+                    shutil.rmtree(self.working_dir)
+                    logger.info("✅ Cleanup completed.")
+            except Exception as e:
+                logger.error(f"❌ Failed to cleanup temporary directory: {e}")
 
     def run_pipeline(self) -> bool:
         """
@@ -447,9 +514,11 @@ class PipelineProcessor:
         
         # Check API keys
         mapbox_key = os.getenv("MAPBOX_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY")
+
         if not mapbox_key:
             logger.warning("⚠️ MAPBOX_API_KEY missing. Satellite download will fail.")
-        if not os.getenv("GEMINI_API_KEY"):
+        if not gemini_key:
             logger.warning("⚠️ GEMINI_API_KEY missing. Geolocation may fail.")
 
         mode = getattr(self.args, "mode", "auto")
@@ -536,5 +605,9 @@ class PipelineProcessor:
         # --- Step 6: Finalize / Backup ---
         self._finalize_output()
         
-        logger.info("✅ Pipeline completed successfully.")
-        return True
+        if success_img:
+            logger.info("✅ Pipeline completed successfully.")
+            return True
+        else:
+            logger.error("❌ Pipeline completed with errors.")
+            return False

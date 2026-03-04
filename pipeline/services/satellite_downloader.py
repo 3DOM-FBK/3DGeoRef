@@ -16,7 +16,7 @@ import sys
 
 class satelliteTileDownloader():
     def __init__(self, center_lat, center_lon, area_size_m, zoom, output_folder):
-        self.api_key = os.environ["MAPBOX_API_KEY"]
+        self.api_key = os.environ.get("MAPBOX_API_KEY")
         self.map_type = "satellite"
         self.center_lat = float(center_lat)
         self.center_lon = float(center_lon)
