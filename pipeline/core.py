@@ -66,6 +66,7 @@ class PipelineProcessor:
             os.environ["GEMINI_API_KEY"] = self.args.gemini_api_key
         if getattr(self.args, "mapbox_api_key", None):
             os.environ["MAPBOX_API_KEY"] = self.args.mapbox_api_key
+        self.pipeline_scale_factor = 1.0
         
         logger.info("Pipeline initialized.")
         logger.info(f"  Input File: {args.input_file}")
@@ -536,6 +537,7 @@ class PipelineProcessor:
             if estimated_dim:
                 scale_factor = self.resize_image_to_dimension("top_view.png", estimated_dim)
                 if scale_factor:
+                    self.pipeline_scale_factor = scale_factor
                     self.scale_3d_model(scale_factor)
             else:
                 logger.error("⛔ Pipeline interrupted at Step 2 (Dimension Estimation).")
@@ -596,7 +598,14 @@ class PipelineProcessor:
         if success_img:
             # Apply final transform
             try:
-                gt = GeoTransformer(self.working_dir, self.args.input_file, self.args.output_folder, lat, lon)
+                gt = GeoTransformer(
+                    self.working_dir,
+                    self.args.input_file,
+                    self.args.output_folder,
+                    lat,
+                    lon,
+                    pipeline_scale=self.pipeline_scale_factor,
+                )
                 gt.run()
             except Exception as e:
                 logger.error(f"❌ Failed to apply GeoTransformer: {e}")

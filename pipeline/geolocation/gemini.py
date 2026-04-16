@@ -6,8 +6,9 @@ from google.genai.types import GenerateContentConfig
 from collections import Counter
 import time
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+# DEFAULT_MODEL = "gemini-3.0-flash"
 # DEFAULT_MODEL = "gemini-2.0-flash-lite"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 # DEFAULT_MODEL = "gemini-1.5-flash"
 
 # 1. Configuration and Initialization

@@ -41,6 +41,7 @@ RUN pip3 install --upgrade pip && \
     trimesh open3d \
     enlighten pygeodesy \
     ollama \
+    openpyxl \
     setuptools && \
     pip3 install torch torchvision
 
