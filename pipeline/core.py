@@ -1,37 +1,40 @@
 import os
 import sys
 import subprocess
-import shutil
-import gc
+import json
 import logging
-from typing import Optional, Tuple, Union
-
-import trimesh
+import shutil
+import numpy as np
+from typing import Optional
 from PIL import Image
-
-# Ensure the pipeline directory is in the python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
-
 from pipeline.services import satelliteTileDownloader
-from pipeline.georeferencing import georef_dim, GeoTransformer, ElevationService, DinoImageMatcher, OrthoCropper
+from pipeline.georeferencing import georef_dim, DinoImageMatcher, OrthoCropper, GeoTransformer, PivotCalculator, MatrixUtils
 
 # Logger configuration
 LOG_LEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL), 
+    level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(levelname)-8s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
+# Suppress verbose logs from external libraries
+logging.getLogger("google").setLevel(logging.ERROR)
+logging.getLogger("google.genai").setLevel(logging.ERROR)
+logging.getLogger("google.auth").setLevel(logging.ERROR)
+logging.getLogger("google.api_core").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+logging.getLogger("requests").setLevel(logging.ERROR)
+logging.getLogger("PIL").setLevel(logging.WARNING)
+
+
 class PipelineProcessor:
     """
-    Manages the 3D georeferencing pipeline, including synthetic view generation,
-    geolocation estimation, scene dimension scaling, and orthophoto processing.
+    Manages the 3D georeferencing pipeline.
     """
 
-    # Constants for external script paths - Adjust these if execution environment changes
-    BLENDER_SCRIPT_PATH = "/app/pipeline/rendering/multiview.py" 
+    BLENDER_SCRIPT_PATH = "/app/pipeline/rendering/multiview.py"
     DIM_SCRIPT_DIR = "/workspace/dim"
     DIM_SCRIPT_DEMO = "demo.py"
     DIM_SCRIPT_JOIN = "join_databases.py"
@@ -44,253 +47,390 @@ class PipelineProcessor:
             args: Parsed command-line arguments containing:
                 - input_file (str): Path to input 3D model.
                 - output_folder (str): Path to save results.
-                - mode (str): Pipeline mode ('auto', 'geoloc', 'dim').
-                - lat (float, optional): Latitude override.
-                - lon (float, optional): Longitude override.
-                - geoloc_model (str): 'gemini', 'geoclip', or 'ollama'.
-                - nr_prediction (int): Number of predictions for geoloc.
-                - area_size (float): Satellite area size.
-                - zoom (int): Satellite zoom level.
-                - ortho (str, optional): Path to user-provided orthophoto.
+                - streetviews (int, optional): Number of streetview renderings.
         """
         self.args = args
         self.base_name = os.path.splitext(os.path.basename(args.input_file))[0]
-        # Use a consistent temporary directory structure
         self.working_dir = os.path.join("/tmp", self.base_name)
-        
-        # Ensure working directory exists
+
         os.makedirs(self.working_dir, exist_ok=True)
 
-        # Set API keys as environment variables if provided in args
-        if getattr(self.args, "gemini_api_key", None):
-            os.environ["GEMINI_API_KEY"] = self.args.gemini_api_key
+        # Optional API key override from CLI args
         if getattr(self.args, "mapbox_api_key", None):
             os.environ["MAPBOX_API_KEY"] = self.args.mapbox_api_key
-        self.pipeline_scale_factor = 1.0
-        
+
         logger.info("Pipeline initialized.")
-        logger.info(f"  Input File: {args.input_file}")
-        logger.info(f"  Working Directory: {self.working_dir}")
-        logger.info(f"  Log Level: {LOG_LEVEL}")
+        logger.info(f"  Input File   : {args.input_file}")
+        logger.info(f"  Working Dir  : {self.working_dir}")
+        logger.info(f"  Output Folder: {args.output_folder}")
 
-    def _free_memory(self):
-        """
-        Frees up memory by running garbage collection and clearing GPU cache if available.
-        """
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-                logger.debug("🧹 GPU cache cleared.")
-        except ImportError:
-            pass # Torch not installed or not needed
-        logger.debug("🧹 Memory freed.")
-
-    def _run_command(self, command: list, cwd: str = None, capture_output: bool = True) -> bool:
-        """
-        Helper to run subprocess commands with logging.
-        
-        Args:
-            command: List of command strings.
-            cwd: Working directory for the command.
-            capture_output: Whether to capture stdout/stderr.
-            
-        Returns:
-            bool: True if successful, False otherwise.
-        """
-        cmd_str = " ".join(command)
-        logger.debug(f"Executing: {cmd_str}")
-        try:
-            if capture_output:
-                subprocess.run(command, check=True, capture_output=True, text=True, cwd=cwd)
-            else:
-                # Direct output to DEVNULL to suppress noise if requested
-                subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=cwd)
-            return True
-        except subprocess.CalledProcessError as e:
-            logger.error(f"❌ Command failed: {cmd_str}")
-            if e.stdout:
-                logger.error(f"  Stdout: {e.stdout}")
-            if e.stderr:
-                logger.error(f"  Stderr: {e.stderr}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Execution error: {e}")
-            return False
+    # -------------------------------------------------------------------------
+    # STEP 1 – Synthetic views via Blender
+    # -------------------------------------------------------------------------
 
     def generate_synthetic_views(self, streetviews: Optional[int] = None) -> bool:
         """
-        Generates synthetic views from the input 3D model using Blender.
+        Launches Blender in background mode to:
+          - Import the input 3D model
+          - Render top-view orthographic image
+          - Render street-view perspective images
+          - Post-process the model (translate + scale)
+          - Export *_scaled.glb
+          - Save matrix_blender.json with the 4x4 transformation matrix
+
+        Args:
+            streetviews (int, optional): Number of street-view cameras around the model.
+
+        Returns:
+            bool: True if Blender exited successfully, False otherwise.
         """
-        logger.info("🔧 Generating synthetic views...")
-        
+        logger.info("🔧 [Step 1] Generating synthetic views with Blender...")
+
         command = [
             "blender", "-b",
             "--python", self.BLENDER_SCRIPT_PATH,
-            "--", 
+            "--",
             "--input_file", self.args.input_file,
-            "--output_folder", self.working_dir
+            "--output_folder", self.working_dir,
         ]
-        
-        if streetviews:
+
+        if streetviews is not None:
             command += ["--streetviews", str(streetviews)]
 
-        # Run without capturing output (silence blender noise), only catch errors
-        return self._run_command(command, capture_output=False)
+        logger.debug(f"Blender command: {' '.join(command)}")
+
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            if result.returncode not in (0, 1):
+                logger.error(f"❌ Blender exited with unexpected code: {result.returncode}")
+                return False, None
+
+            # Parse matrix from stdout (tagged line)
+            M_blender = None
+            for line in result.stdout.splitlines():
+                if line.startswith("MATRIX_BLENDER:"):
+                    matrix_list = json.loads(line[len("MATRIX_BLENDER:"):])
+                    M_blender = np.array(matrix_list, dtype=np.float64)
+                    break
+
+            if M_blender is None:
+                logger.error("❌ MATRIX_BLENDER tag not found in Blender stdout.")
+                return False, None
+
+            logger.info("✅ Blender process finished.")
+            return True, M_blender
+
+        except FileNotFoundError:
+            logger.error("❌ 'blender' executable not found. Is Blender installed and in PATH?")
+            return False, None
+        except Exception as e:
+            logger.error(f"❌ Error running Blender: {e}")
+            return False, None
+
+    # -------------------------------------------------------------------------
+    # STEP 1b – Load Blender transformation matrix
+    # -------------------------------------------------------------------------
+
+    def _validate_blender_matrix(self, M: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Validates the 4x4 transformation matrix received from Blender stdout.
+
+        The matrix encodes the combined Translation x Scale applied to the mesh
+        during Blender post-processing (postprocess_model in multiview.py):
+
+            M_blender = Scale @ Translation
+
+        where:
+          - Translation aligns the bottom-left corner of the ortho camera to the origin
+          - Scale brings the mesh width to match the rendered image resolution (px = units)
+
+        Args:
+            M (np.ndarray): Matrix to validate.
+
+        Returns:
+            np.ndarray: Validated 4x4 float64 matrix, or None if invalid.
+        """
+        if M.shape != (4, 4):
+            logger.error(f"❌ Unexpected matrix shape: {M.shape}. Expected (4, 4).")
+            return None
+
+        logger.info("✅ Blender transformation matrix received successfully.")
+        logger.info(f"\n   Matrix (4x4):\n{M}\n")
+        return M
+
+    # -------------------------------------------------------------------------
+    # STEP 2 – Dimension estimation + metric scaling
+    # -------------------------------------------------------------------------
 
     def estimate_scene_dimension(self) -> Optional[float]:
         """
-        Estimates the real-world dimension (in meters) of the scene using the top-view image.
-        Uses lazy import for Gemini dependencies.
+        Estimates the real-world width (in meters) of the scene captured in
+        top_view.png using the GeminiDimensionEstimator.
+
+        Returns:
+            float: Estimated width in meters, or None on failure.
         """
-        logger.info("📏 Estimating scene dimensions using Gemini...")
         top_view_path = os.path.join(self.working_dir, "top_view.png")
-        
+
         if not os.path.exists(top_view_path):
-            logger.warning(f"⚠️ Top view image not found at {top_view_path}. Skipping dimension estimation.")
+            logger.error(f"❌ top_view.png not found at: {top_view_path}")
             return None
 
+        logger.info("📏 [Step 2a] Estimating scene dimension via Gemini...")
         try:
             from pipeline.geolocation.gemini import GeminiDimensionEstimator
             estimator = GeminiDimensionEstimator(model_name=self.args.gemini_model)
             dimension = estimator.estimate_dimension(top_view_path)
-            
-            if dimension:
-                logger.info(f"✅ Estimated dimension: {dimension} meters")
-                return dimension
-            else:
-                logger.warning("⚠️ Could not estimate dimension.")
+
+            if dimension is None:
+                logger.error("❌ Gemini returned no dimension estimate.")
                 return None
-        except Exception as e:
-            logger.error(f"❌ Error estimating dimension: {e}")
-            return None
 
-    def resize_image_to_dimension(self, image_name: str, dimension: float) -> Optional[float]:
-        """
-        Resizes the image such that its width matches the estimated dimension (1 px = 1 m).
-        Returns the scale factor applied (target_width / original_width).
-        """
-        image_path = os.path.join(self.working_dir, image_name)
-        if not os.path.exists(image_path):
-             logger.warning(f"⚠️ Image {image_name} not found, cannot resize.")
-             return None
-        
-        try:
-            with Image.open(image_path) as img:
-                original_width, original_height = img.size
-                target_width = int(dimension)
-                
-                # Aspect ratio preservation
-                aspect_ratio = original_height / original_width
-                target_height = int(target_width * aspect_ratio)
-
-                logger.info(f"🔄 Resizing {image_name} to {target_width}x{target_height} px (Width: {dimension}m)")
-                
-                resized = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
-                resized.save(image_path)
-                
-                scale_factor = target_width / original_width
-                return scale_factor
+            logger.info(f"✅ Estimated scene width: {dimension:.2f} m")
+            return dimension
 
         except Exception as e:
-            logger.error(f"❌ Error resizing {image_name}: {e}")
+            logger.error(f"❌ Error during dimension estimation: {e}")
             return None
 
-    def scale_3d_model(self, scale_factor: float):
+    def scale_3d_model(self, scale_factor: float) -> bool:
         """
-        Scales the 3D model (ending in '_scaled.glb') by the given factor.
+        Applies a uniform metric scale to the *_scaled.glb model produced by
+        Blender so that 1 unit = 1 metre in the output.
+
+        The scale factor is:  dimension_meters / image_width_px
+        (because after Blender post-processing 1 px == 1 Blender unit)
+
+        Args:
+            scale_factor (float): Scale to apply to the mesh.
+
+        Returns:
+            bool: True if successful, False otherwise.
         """
+        import trimesh
+
+        # Find *_scaled.glb in working dir
         target_file = None
-        
-        # Find the scaled model file in working dir
-        if os.path.exists(self.working_dir):
-            for f in os.listdir(self.working_dir):
-                if f.endswith("_scaled.glb"):
-                    target_file = os.path.join(self.working_dir, f)
-                    break
-        
-        # Fallback to input file path if relevant
-        if not target_file and self.args.input_file.endswith("_scaled.glb") and os.path.exists(self.args.input_file):
-            target_file = self.args.input_file
+        for f in os.listdir(self.working_dir):
+            if f.endswith("_scaled.glb"):
+                target_file = os.path.join(self.working_dir, f)
+                break
 
         if not target_file:
-            logger.warning("⚠️ No model ending with '_scaled.glb' found to scale.")
-            return
+            logger.error("❌ No *_scaled.glb file found in working dir.")
+            return False
 
-        logger.info(f"⚖️ Scaling 3D model {os.path.basename(target_file)} by factor {scale_factor:.4f}...")
-        
+        logger.info(f"⚖️  [Step 2b] Scaling '{os.path.basename(target_file)}' by factor {scale_factor:.6f}...")
         try:
             scene = trimesh.load(target_file)
             matrix = trimesh.transformations.scale_matrix(scale_factor)
-            
+
             if isinstance(scene, trimesh.Scene):
                 for geom in scene.geometry.values():
                     geom.apply_transform(matrix)
             else:
                 scene.apply_transform(matrix)
-                
+
             scene.export(target_file)
-            logger.info("✅ Model scaled and saved.")
+            logger.info(f"✅ Model scaled and saved → {target_file}")
+            return True
+
         except Exception as e:
             logger.error(f"❌ Error scaling 3D model: {e}")
+            return False
 
-    def _estimate_geoloc_generic(self, geoloc_type: str, nr_prediction: int) -> Tuple[float, float]:
+    # -------------------------------------------------------------------------
+    # STEP 3 – Geolocation estimation
+    # -------------------------------------------------------------------------
+
+    def estimate_geolocation(self) -> Optional[tuple]:
         """
-        Generic handler for different geolocation strategies (GeoCLIP, Ollama, Gemini).
+        Estimates the geographic coordinates (lat, lon) of the scene based on
+        the rendered street-view images using GeminiGeolocator.
+
+        Analyzes images in working_dir to determine GPS location with high precision.
+
+        Returns:
+            tuple: (latitude, longitude) as floats, or None on failure.
         """
-        logger.info(f"📍 Estimating geolocation using {geoloc_type}...")
-        
-        predictor = None
+        logger.info("📍 [Step 3] Estimating geolocation via Gemini...")
         try:
-            if geoloc_type == "geoclip":
-                from pipeline.geolocation.geoclip import GeoClipBatchPredictor
-                predictor = GeoClipBatchPredictor(top_k=int(nr_prediction))
-                most_common, _ = predictor.predict_folder(self.working_dir)
-                
-            elif geoloc_type == "ollama":
-                from pipeline.geolocation.ollama import ImageToCoordinates
-                predictor = ImageToCoordinates(ollama_model="llama3.2-vision")
-                most_common, _ = predictor.run_pipeline(self.working_dir)
-                
-            else: # gemini
-                from pipeline.geolocation.gemini import GeminiGeolocator
-                predictor = GeminiGeolocator(model_name=self.args.gemini_model)
-                most_common, _ = predictor.run_pipeline(self.working_dir)
+            from pipeline.geolocation.gemini import GeminiGeolocator
+            geolocator = GeminiGeolocator(model_name=self.args.gemini_model)
+            most_common, predictions = geolocator.run_pipeline(self.working_dir)
 
-            # Cleanup
-            del predictor
-            self._free_memory()
-
-            if not most_common:
-                raise RuntimeError("No predictions returned.")
+            if most_common is None:
+                logger.error("❌ Gemini geolocation returned no predictions.")
+                return None
 
             lat, lon = most_common
-            logger.info(f"✅ Estimated coordinates ({geoloc_type}): Latitude={lat}, Longitude={lon}")
-            return float(lat), float(lon)
+            logger.info(f"✅ Estimated coordinates: Lat={lat:.6f}, Lon={lon:.6f}")
+            if predictions:
+                logger.info(f"   (from {len(predictions)} predictions)")
+            return (float(lat), float(lon))
 
         except Exception as e:
-            logger.error(f"❌ Error estimating geolocation ({geoloc_type}): {e}")
-            raise
+            logger.error(f"❌ Error during geolocation estimation: {e}")
+            return None
 
-    def download_satellite_imagery(self, lat: float, lon: float) -> bool:
+    # -------------------------------------------------------------------------
+    # STEP 4 – Mapbox satellite tiles download
+    # -------------------------------------------------------------------------
+
+    def download_satellite_tiles(self, lat: float, lon: float) -> bool:
         """
-        Downloads satellite imagery using the TileDownloader service.
+        Downloads satellite tiles from Mapbox and builds a GeoTIFF centered on
+        the estimated coordinates.
+
+        Args:
+            lat (float): Latitude.
+            lon (float): Longitude.
+
+        Returns:
+            bool: True if download + merge succeed, False otherwise.
         """
-        if not self.args.area_size or not self.args.zoom:
-            logger.warning("⚠️ Missing area_size or zoom for satellite download.")
+        mapbox_key = os.getenv("MAPBOX_API_KEY")
+        if not mapbox_key:
+            logger.error("❌ MAPBOX_API_KEY not set. Cannot download satellite tiles.")
             return False
 
-        logger.info("🛰️ Downloading satellite imagery...")
+        area_size = int(getattr(self.args, "area_size", 500))
+        zoom = int(getattr(self.args, "zoom", 18))
+
+        logger.info("🛰️  [Step 4] Downloading Mapbox satellite tiles...")
+        logger.info(f"   center     : ({lat:.6f}, {lon:.6f})")
+        logger.info(f"   area_size  : {area_size} m")
+        logger.info(f"   zoom       : {zoom}")
+
         try:
             downloader = satelliteTileDownloader(
-                lat, lon, self.args.area_size, self.args.zoom, self.working_dir
+                center_lat=lat,
+                center_lon=lon,
+                area_size_m=area_size,
+                zoom=zoom,
+                output_folder=self.working_dir,
             )
-            return downloader.run_pipeline()
+            success = downloader.run_pipeline()
+            if not success:
+                logger.error("❌ Satellite tile download failed.")
+                return False
+
+            expected_tif = os.path.join(self.working_dir, f"{self.base_name}.tif")
+            if os.path.exists(expected_tif):
+                logger.info(f"✅ Satellite GeoTIFF ready: {expected_tif}")
+            else:
+                logger.warning("⚠️ Download reported success but GeoTIFF not found with expected name.")
+            return True
+
         except Exception as e:
-            logger.error(f"❌ Error downloading satellite imagery: {e}")
+            logger.error(f"❌ Error downloading satellite tiles: {e}")
             return False
+
+    # -------------------------------------------------------------------------
+    # STEP 5 – DINO + crop + DIM
+    # -------------------------------------------------------------------------
+
+    def _run_command(self, command: list, cwd: Optional[str] = None) -> bool:
+        """
+        Runs a command quietly and logs errors only.
+        """
+        try:
+            res = subprocess.run(
+                command,
+                cwd=cwd,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if res.returncode != 0:
+                logger.error(f"❌ Command failed (code {res.returncode}): {' '.join(command)}")
+                if res.stderr:
+                    logger.error(res.stderr.strip())
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"❌ Command execution error: {e}")
+            return False
+
+    def _prepare_dim_images_folder(self) -> Optional[tuple]:
+        """
+        Prepares /images folder with ortho + top_view for DIM.
+
+        Returns:
+            tuple: (images_dir, ortho_path, render_path) or None if missing files.
+        """
+        images_dir = os.path.join(self.working_dir, "images")
+        os.makedirs(images_dir, exist_ok=True)
+
+        ortho_src = os.path.join(self.working_dir, f"{self.base_name}.tif")
+        render_src = os.path.join(self.working_dir, "top_view.png")
+
+        if not os.path.exists(ortho_src):
+            logger.error(f"❌ Orthophoto not found: {ortho_src}")
+            return None
+        if not os.path.exists(render_src):
+            logger.error(f"❌ Render not found: {render_src}")
+            return None
+
+        ortho_path = os.path.join(images_dir, f"{self.base_name}.tif")
+        render_path = os.path.join(images_dir, "top_view.png")
+
+        shutil.copy2(ortho_src, ortho_path)
+        shutil.copy2(render_src, render_path)
+
+        return images_dir, ortho_path, render_path
+
+    def _run_dino_and_crop(self, ortho_path: str, render_path: str) -> bool:
+        """
+        Runs DINO matching and crops orthophoto around matched center if successful.
+        If DINO fails, pipeline continues with original ortho.
+        """
+        logger.info("🦕 [Step 5a] Running DINO matcher...")
+        try:
+            dino = DinoImageMatcher(dino_version="v2", downscale_factor=1.0)
+            dino_output = os.path.join(self.working_dir, "dino_results")
+            center_row, center_col = dino.match(
+                base_image_path=ortho_path,
+                template_image_path=render_path,
+                output_dir=dino_output,
+            )
+
+            if center_row is None or center_col is None:
+                logger.warning("⚠️ DINO returned no center. Skipping crop.")
+                return True
+
+            logger.info(f"✅ DINO center: row={center_row:.2f}, col={center_col:.2f}")
+            logger.info("✂️ [Step 5b] Cropping orthophoto around DINO center...")
+
+            cropper = OrthoCropper(scale_factor=2.0)
+            cropped_path = os.path.join(os.path.dirname(ortho_path), f"{self.base_name}_cropped.tif")
+            out = cropper.crop(
+                ortho_path=ortho_path,
+                reference_image_path=render_path,
+                center_row=center_row,
+                center_col=center_col,
+                output_path=cropped_path,
+            )
+
+            if out and os.path.exists(out):
+                os.remove(ortho_path)
+                shutil.move(out, ortho_path)
+                logger.info("✅ Orthophoto cropped and replaced.")
+            else:
+                logger.warning("⚠️ Crop output missing. Keeping original orthophoto.")
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"⚠️ DINO/Crop failed, continuing with original ortho: {e}")
+            return True
 
     def _rotate_image_variants(self, file_path: str):
         """
@@ -303,9 +443,9 @@ class PipelineProcessor:
             img = Image.open(file_path)
             folder, filename = os.path.split(file_path)
             name, ext = os.path.splitext(filename)
-            
+
             for angle in [90, 180, 270]:
-                rotated_img = img.rotate(-angle, expand=True) # Negative for clockwise
+                rotated_img = img.rotate(-angle, expand=True)  # negative = clockwise
                 output_path = os.path.join(folder, f"{name}_rot{angle}{ext}")
                 rotated_img.save(output_path)
         except Exception as e:
@@ -313,7 +453,7 @@ class PipelineProcessor:
 
     def _create_scaled_variants(self, image_path: str):
         """
-        Creates scaled versions (25%, 50%, 75%) of the image.
+        Creates scaled versions (25%, 50%, 75%) of the orthophoto.
         """
         if not os.path.exists(image_path):
             return
@@ -324,82 +464,46 @@ class PipelineProcessor:
             name, ext = os.path.splitext(filename)
 
             scales = [(0.25, "_s_0_25"), (0.5, "_s_0_50"), (0.75, "_s_0_75")]
-            
+
             for scale, suffix in scales:
                 new_size = (int(img.width * scale), int(img.height * scale))
                 resized = img.resize(new_size, Image.Resampling.LANCZOS)
                 new_filename = os.path.join(base_dir, f"{name}{suffix}{ext}")
                 resized.save(new_filename, format="TIFF")
         except Exception as e:
-             logger.error(f"⚠️ Error creating scaled variants for {image_path}: {e}")
+            logger.error(f"⚠️ Error creating scaled variants for {image_path}: {e}")
 
-    def run_deep_image_matching_and_georef(self):
+    def _validate_image_variants(self, ortho_path: str, render_path: str) -> bool:
         """
-        Executes Deep-Image-Matching (DIM) and georeferencing.
+        Validates that required rotated/scaled image variants exist before DIM.
         """
-        logger.info("🔧 Running Deep-Image-Matching & Georeferencing...")
+        render_base, render_ext = os.path.splitext(render_path)
+        ortho_base, ortho_ext = os.path.splitext(ortho_path)
 
-        ortho_path = os.path.join(self.working_dir, "images", self.base_name + ".tif")
-        render_path = os.path.join(self.working_dir, "images", "top_view.png")
-        output_matrix_path = os.path.join(self.working_dir, "transformation.txt")
+        required = [
+            f"{render_base}_rot90{render_ext}",
+            f"{render_base}_rot180{render_ext}",
+            f"{render_base}_rot270{render_ext}",
+            f"{ortho_base}_s_0_25{ortho_ext}",
+            f"{ortho_base}_s_0_50{ortho_ext}",
+            f"{ortho_base}_s_0_75{ortho_ext}",
+        ]
 
-        # RUN Luca's DINO script (if enabled)
-        use_dino = getattr(self.args, "use_dino", False)
-        
-        if use_dino:
-            images_dir = os.path.join(self.working_dir, "images")
-            if os.path.isdir(images_dir):
-                try:
-                    dino_matcher = DinoImageMatcher(dino_version="v2", downscale_factor=1.0)
-                    
-                    # Find the ortho (base image) and render (template) in the images directory
-                    ortho_in_dir = os.path.join(images_dir, self.base_name + ".tif")
-                    render_in_dir = os.path.join(images_dir, "top_view.png")
-                    
-                    if os.path.exists(ortho_in_dir) and os.path.exists(render_in_dir):
-                        logger.info(f"🦕 Running DINO matching on images in {images_dir}")
-                        dino_output_dir = os.path.join(self.working_dir, "dino_results")
-                        center_row, center_col = dino_matcher.match(
-                            base_image_path=ortho_in_dir,
-                            template_image_path=render_in_dir,
-                            output_dir=dino_output_dir
-                        )
-                        logger.info(f"✅ DINO match completed: center=({center_row:.2f}, {center_col:.2f})")
+        missing = [p for p in required if not os.path.exists(p)]
+        if missing:
+            logger.error("❌ Missing image variants required by DIM:")
+            for m in missing:
+                logger.error(f"   - {m}")
+            return False
+        return True
 
-                        # Crop the orthophoto centered on the DINO match position
-                        logger.info("✂️ Cropping orthophoto based on DINO match...")
-                        cropper = OrthoCropper(scale_factor=2.0)
-                        cropped_ortho_path = cropper.crop(
-                            ortho_path=ortho_in_dir,
-                            reference_image_path=render_in_dir,
-                            center_row=center_row,
-                            center_col=center_col,
-                            output_path=os.path.join(images_dir, f"{self.base_name}_cropped.tif")
-                        )
-                        
-                        # Remove original ortho and rename cropped to original name for pipeline continuity
-                        os.remove(ortho_in_dir)
-                        shutil.move(cropped_ortho_path, ortho_in_dir)
-                        
-                        del cropper
-                    else:
-                        logger.warning(f"⚠️ DINO: Required images not found in {images_dir}")
-                        
-                    del dino_matcher
-                    self._free_memory()
-                except Exception as e:
-                    logger.error(f"❌ DINO matching/cropping failed: {e}")
-            else:
-                logger.warning(f"⚠️ Images directory not found: {images_dir}")
-        else:
-            logger.debug("DINO matching disabled (use --use_dino to enable)")
+    def _run_dim_and_georef(self, ortho_path: str, render_path: str) -> bool:
+        """
+        Runs DIM (LoFTR + SuperPoint/SuperGlue), merges DBs, and computes georef matrix.
+        """
+        logger.info("🧩 [Step 5c] Running DIM pipelines...")
 
-        # Prepare image variants
-        self._rotate_image_variants(render_path)
-        self._create_scaled_variants(ortho_path)
-
-        # Helper to run DIM for a specific pair type
-        def run_dim(pair_type: str):
+        def run_dim(pair_type: str) -> bool:
             cmd = [
                 "python3", self.DIM_SCRIPT_DEMO,
                 "-p", pair_type,
@@ -409,214 +513,210 @@ class PipelineProcessor:
                 "--skip_reconstruction",
                 "-q", "high",
                 "-V",
-                "-d", self.working_dir
+                "-d", self.working_dir,
             ]
-            # Assumes DIM_SCRIPT_DIR is a valid path where DIM is installed
-            self._run_command(cmd, cwd=self.DIM_SCRIPT_DIR)
+            return self._run_command(cmd, cwd=self.DIM_SCRIPT_DIR)
 
-        # 1. Run DIM with LoFTR
-        run_dim("loftr")
-        
-        # 2. Run DIM with SuperPoint+SuperGlue
-        run_dim("superpoint+superglue")
+        ok_loftr = run_dim("loftr")
+        ok_sp = run_dim("superpoint+superglue")
+        if not (ok_loftr and ok_sp):
+            logger.error("❌ DIM failed on one or more matchers.")
+            return False
 
-        # 3. Merge Databases
         merge_db_path = os.path.join(self.working_dir, "merge_db")
         os.makedirs(merge_db_path, exist_ok=True)
-        
+
         db_loftr = os.path.join(self.working_dir, "results_loftr_bruteforce_quality_high", "database.db")
         db_sp = os.path.join(self.working_dir, "results_superpoint+superglue_bruteforce_quality_high", "database.db")
 
         if os.path.exists(db_loftr):
-            shutil.copy(db_loftr, os.path.join(merge_db_path, "database_loftr.db"))
+            shutil.copy2(db_loftr, os.path.join(merge_db_path, "database_loftr.db"))
         if os.path.exists(db_sp):
-            shutil.copy(db_sp, os.path.join(merge_db_path, "database_superpoint.db"))
+            shutil.copy2(db_sp, os.path.join(merge_db_path, "database_superpoint.db"))
 
         join_cmd = [
             "python3", self.DIM_SCRIPT_JOIN,
             "-i", merge_db_path,
-            "-o", self.working_dir
+            "-o", self.working_dir,
         ]
-        # Assumes join script is in the scripts subdirectory of DIM_SCRIPT_DIR
-        self._run_command(join_cmd, cwd=os.path.join(self.DIM_SCRIPT_DIR, "scripts"))
+        if not self._run_command(join_cmd, cwd=os.path.join(self.DIM_SCRIPT_DIR, "scripts")):
+            logger.error("❌ Failed to join DIM databases.")
+            return False
 
-        # 4. Compute Georeferencing Matrix
+        logger.info("🧭 [Step 5d] Computing georeferencing transform...")
         try:
+            output_matrix_path = os.path.join(self.working_dir, "transformation.txt")
             joined_db = os.path.join(self.working_dir, "joined.db")
             processor = georef_dim(ortho_path, render_path, output_matrix_path, joined_db, debug=False)
             processor.run_pipeline()
+            logger.info(f"✅ Georeferencing matrix ready: {output_matrix_path}")
+            return True
         except Exception as e:
             logger.error(f"❌ Georeferencing calculation failed: {e}")
+            return False
 
-    def move_images_to_subfolder(self, ortho_map: Optional[str] = None):
+    def run_step5_dino_crop_dim(self) -> bool:
         """
-        Organizes images into an 'images' subfolder.
+        Full Step 5 orchestration:
+          1) Prepare images folder
+          2) DINO matching
+          3) Optional orthophoto crop
+          4) DIM + DB join + georef matrix
         """
-        images_dir = os.path.join(self.working_dir, "images")
-        os.makedirs(images_dir, exist_ok=True)
+        prep = self._prepare_dim_images_folder()
+        if prep is None:
+            return False
+        _, ortho_path, render_path = prep
 
-        for file_name in os.listdir(self.working_dir):
-            if file_name == "top_view.png" or file_name.lower().endswith(".tif"):
-                src = os.path.join(self.working_dir, file_name)
-                dst = os.path.join(images_dir, file_name)
-                try:
-                    shutil.move(src, dst)
-                except Exception as e:
-                    logger.warning(f"  Failed to move {file_name}: {e}")
-        
-        if ortho_map:
-            try:
-                shutil.copy(ortho_map, os.path.join(images_dir, os.path.basename(ortho_map)))
-            except Exception as e:
-                logger.error(f"  Failed to copy user ortho map: {e}")
+        if not self._run_dino_and_crop(ortho_path, render_path):
+            return False
 
-    def _finalize_output(self):
-        """
-        Handles copying of final results and backing up the working directory.
-        """
-        # Copy Orthophoto
-        ortho_src = os.path.join(self.working_dir, "images", self.base_name + ".tif")
-        if os.path.exists(ortho_src):
-            try:
-                dest = os.path.join(self.args.output_folder, self.base_name, self.base_name + ".tif")
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.copy(ortho_src, dest)
-                logger.info(f"✅ Orthophoto saved to: {dest}")
-            except Exception as e:
-                logger.error(f"❌ Failed to copy orthophoto: {e}")
+        # Prepare image variants before DIM
+        self._rotate_image_variants(render_path)
+        self._create_scaled_variants(ortho_path)
 
-        # # Backup Working Directory - Temporary
-        # try:
-        #     backup_path = os.path.join(self.args.output_folder, self.base_name, "working_dir_backup")
-        #     if os.path.exists(self.working_dir):
-        #         shutil.copytree(self.working_dir, backup_path, dirs_exist_ok=True)
-        #         logger.info(f"✅ Temporary working directory backed up to: {backup_path}")
-        # except Exception as e:
-        #     logger.error(f"❌ Failed to backup temporary directory: {e}")
+        if not self._validate_image_variants(ortho_path, render_path):
+            return False
 
-        # Cleanup Temporary Working Directory
-        if getattr(self.args, "cleanup", False):
-            try:
-                if os.path.exists(self.working_dir):
-                    logger.info(f"🧹 Cleaning up temporary directory: {self.working_dir}")
-                    shutil.rmtree(self.working_dir)
-                    logger.info("✅ Cleanup completed.")
-            except Exception as e:
-                logger.error(f"❌ Failed to cleanup temporary directory: {e}")
+        return self._run_dim_and_georef(ortho_path, render_path)
+
+    # -------------------------------------------------------------------------
+    # PIPELINE ENTRY POINT
+    # -------------------------------------------------------------------------
 
     def run_pipeline(self) -> bool:
         """
         Main execution method for the pipeline.
-        
+
         Returns:
             bool: True if successful, False otherwise.
         """
+        logger.info("=" * 60)
         logger.info("🚀 Starting Pipeline Execution")
-        
-        # Check API keys
-        mapbox_key = os.getenv("MAPBOX_API_KEY")
-        gemini_key = os.getenv("GEMINI_API_KEY")
+        logger.info("=" * 60)
 
-        if not mapbox_key:
-            logger.warning("⚠️ MAPBOX_API_KEY missing. Satellite download will fail.")
-        if not gemini_key:
-            logger.warning("⚠️ GEMINI_API_KEY missing. Geolocation may fail.")
+        # ------------------------------------------------------------------
+        # STEP 1: Run Blender – synthetic views + model post-processing
+        # ------------------------------------------------------------------
+        streetviews = int(getattr(self.args, "streetviews", 3))
+        ok, M_raw = self.generate_synthetic_views(streetviews=streetviews)
 
-        mode = getattr(self.args, "mode", "auto")
-        
-        # --- Step 1: Synthetic Views ---
-        if mode in ("auto", "geoloc", "dim"):
-            # generate_synthetic_views handles logging, we just check return
-            if not self.generate_synthetic_views(streetviews=3):
-                logger.error("⛔ Pipeline interrupted at Step 1 (Synthetic Views).")
-                return False
-
-        # --- Step 2: Dimension Estimation ---
-        if mode in ("auto", "geoloc", "dim"):
-            estimated_dim = self.estimate_scene_dimension()
-            if estimated_dim:
-                scale_factor = self.resize_image_to_dimension("top_view.png", estimated_dim)
-                if scale_factor:
-                    self.pipeline_scale_factor = scale_factor
-                    self.scale_3d_model(scale_factor)
-            else:
-                logger.error("⛔ Pipeline interrupted at Step 2 (Dimension Estimation).")
-                return False
-
-        # --- Step 3: Geolocation ---
-        lat, lon = self.args.lat, self.args.lon
-        
-        if mode in ("auto", "geoloc") and (lat is None or lon is None):
-            geoloc_model = getattr(self.args, "geoloc_model", "gemini").lower()
-            try:
-                lat, lon = self._estimate_geoloc_generic(geoloc_model, self.args.nr_prediction)
-            except Exception:
-                logger.error("⛔ Pipeline interrupted at Step 3 (Geolocation).")
-                return False
-                
-        elif mode == "dim" and (lat is None or lon is None):
-            logger.error("❌ Mode 'dim' requires valid 'lat' and 'lon' arguments.")
+        if not ok:
+            logger.error("⛔ Pipeline interrupted at Step 1 (Blender).")
             return False
 
-        # --- Step 4: Elevation ---
-        elevation = 0.0
+        # ------------------------------------------------------------------
+        # STEP 1b: Validate the Blender transformation matrix
+        # ------------------------------------------------------------------
+        M_blender = self._validate_blender_matrix(M_raw)
+
+        if M_blender is None:
+            logger.error("⛔ Pipeline interrupted: invalid Blender matrix.")
+            return False
+
+        # ------------------------------------------------------------------
+        # STEP 2: Dimension estimation + metric scaling of the 3D model
+        # ------------------------------------------------------------------
+        dimension_m = self.estimate_scene_dimension()
+
+        if dimension_m is None:
+            logger.error("⛔ Pipeline interrupted at Step 2 (Dimension Estimation).")
+            return False
+
+        # After Blender post-processing: 1 Blender unit == 1 pixel of top_view.png.
+        # We need 1 unit == 1 metre, so the scale factor is metres / pixels.
+        top_view_path = os.path.join(self.working_dir, "top_view.png")
+        with Image.open(top_view_path) as img:
+            image_width_px = img.width
+
+        metric_scale = dimension_m / image_width_px
+        logger.info(f"   image width : {image_width_px} px")
+        logger.info(f"   scene width : {dimension_m:.2f} m")
+        logger.info(f"   metric scale: {metric_scale:.6f} m/px")
+
+        if not self.scale_3d_model(metric_scale):
+            logger.error("⛔ Pipeline interrupted at Step 2 (Model Scaling).")
+            return False
+
+        # Resize top_view.png so that its width == dimension_m pixels (1 px = 1 m)
+        target_width_px = int(round(dimension_m))
+        with Image.open(top_view_path) as img:
+            orig_w, orig_h = img.width, img.height
+            target_height_px = int(round(orig_h * target_width_px / orig_w))
+            resized = img.resize((target_width_px, target_height_px), Image.Resampling.LANCZOS)
+            resized.save(top_view_path)
+        logger.info(f"✅ top_view.png resized: {orig_w}x{orig_h} → {target_width_px}x{target_height_px} px")
+
+        # Store for downstream steps
+        self.metric_scale = metric_scale
+
+        # ------------------------------------------------------------------
+        # STEP 3: Geolocation estimation
+        # ------------------------------------------------------------------
+        coords = self.estimate_geolocation()
+
+        if coords is None:
+            logger.error("⛔ Pipeline interrupted at Step 3 (Geolocation).") 
+            return False
+
+        self.latitude, self.longitude = coords
+
+        # ------------------------------------------------------------------
+        # STEP 4: Download satellite tiles from Mapbox
+        # ------------------------------------------------------------------
+        if not self.download_satellite_tiles(self.latitude, self.longitude):
+            logger.error("⛔ Pipeline interrupted at Step 4 (Mapbox Tiles Download).")
+            return False
+
+        # ------------------------------------------------------------------
+        # STEP 5: DINO + crop orthophoto + DIM
+        # ------------------------------------------------------------------
+        if not self.run_step5_dino_crop_dim():
+            logger.error("⛔ Pipeline interrupted at Step 5 (DINO/Crop/DIM).")
+            return False
+
+        # ------------------------------------------------------------------
+        # STEP 6: Apply DIM transform to *_scaled.glb (overwrite)
+        # ------------------------------------------------------------------
+        logger.info("🔧 [Step 6] Applying DIM transform to scaled mesh...")
+        transformer = GeoTransformer(
+            working_dir=self.working_dir,
+            input_file=self.args.input_file,
+            output_folder=self.args.output_folder,
+            lat=self.latitude,
+            lon=self.longitude,
+            pipeline_scale=self.metric_scale,
+        )
+        if not transformer.run():
+            logger.error("⛔ Pipeline interrupted at Step 6 (GeoTransformer).")
+            return False
+
+        # ------------------------------------------------------------------
+        # STEP 6b: Compute pivot XY of the fully transformed model
+        # ------------------------------------------------------------------
+        logger.info("📍 [Step 6b] Computing pivot XY...")
         try:
-            elevation = ElevationService.get_elevation(lat, lon)
-            logger.info(f"🏔️  Elevation at ({lat}, {lon}): {elevation}m")
-        except Exception as e:
-            logger.error(f"❌ Failed to get elevation: {e}")
-            logger.error("⛔ Pipeline interrupted at Step 4.")
-            return False
+            dim_matrix = MatrixUtils.load_matrix(
+                os.path.join(self.working_dir, "transformation.txt")
+            )
+            pivot_calc = PivotCalculator(
+                input_mesh_path=self.args.input_file,
+                blender_matrix=M_blender,
+                metric_scale=self.metric_scale,
+                dim_matrix=dim_matrix,
+            )
+            pivot_x, pivot_y, M_total = pivot_calc.compute_pivot_xy()
+            logger.info(f"✅ Pivot XY computed: X={pivot_x:.6f}, Y={pivot_y:.6f}")
+        except Exception as exc:
+            logger.error(f"❌ PivotCalculator failed: {exc}")
+            pivot_x, pivot_y = None, None
 
-        # Return early if only geolocation was requested by the actual Pipeline mode
-        # (Though 'geoloc' mode usually still falls through if you proceed logic wise, 
-        # previous code did return here. We'll stick to that behavior)
-        if mode == "geoloc":
-            return lat, lon
-
-        # --- Step 5: Ortho / Satellite Imagery & Transformation ---
-        ortho_provided = getattr(self.args, "ortho", None)
-        success_img = False
-        
-        if ortho_provided:
-            logger.info("--> Using user-provided ortho images")
-            self.move_images_to_subfolder(ortho_provided)
-            self.run_deep_image_matching_and_georef()
-            success_img = True
-            
-        elif mapbox_key:
-            if self.download_satellite_imagery(lat, lon):
-                self.move_images_to_subfolder()
-                self.run_deep_image_matching_and_georef()
-                success_img = True
-            else:
-                logger.error("❌ Failed to download satellite imagery.")
-        
-        else:
-             logger.warning("⚠️ No ortho image and no Mapbox key. Skipping DIM and Georef.")
-
-        if success_img:
-            # Apply final transform
-            try:
-                gt = GeoTransformer(
-                    self.working_dir,
-                    self.args.input_file,
-                    self.args.output_folder,
-                    lat,
-                    lon,
-                    pipeline_scale=self.pipeline_scale_factor,
-                )
-                gt.run()
-            except Exception as e:
-                logger.error(f"❌ Failed to apply GeoTransformer: {e}")
-                return False
-
-        # --- Step 6: Finalize / Backup ---
-        self._finalize_output()
-        
-        if success_img:
-            logger.info("✅ Pipeline completed successfully.")
-            return True
-        else:
-            logger.error("❌ Pipeline completed with errors.")
-            return False
+        logger.info("=" * 60)
+        logger.info("⏹️  STOP – Step 6 complete.")
+        logger.info(f"   M_blender stored  | shape={M_blender.shape}")
+        logger.info(f"   metric_scale      | {metric_scale:.6f} m/px")
+        logger.info(f"   coordinates       | ({self.latitude:.6f}, {self.longitude:.6f})")
+        logger.info(f"   ortho_map         | {os.path.join(self.working_dir, self.base_name + '.tif')}")
+        logger.info(f"   transform_matrix  | {os.path.join(self.working_dir, 'transformation.txt')}")
+        logger.info("=" * 60)
+        sys.exit(0)

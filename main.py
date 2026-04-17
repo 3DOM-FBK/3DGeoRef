@@ -22,16 +22,16 @@ def parse_args():
         help="Enable DINO-based image alignment before Deep Image Matching (default: disabled)"
     )
 
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["auto", "geoloc", "dim"],
-        default="auto",
-        help="Pipeline execution mode: "
-            "'auto' = full pipeline, "
-            "'geoloc' = only Geolocalize step, "
-            "'dim' = only Deep Image Matching (requires provided lat/lon)"
-    )
+    # parser.add_argument(
+    #     "--mode",
+    #     type=str,
+    #     choices=["auto", "geoloc", "dim"],
+    #     default="auto",
+    #     help="Pipeline execution mode: "
+    #         "'auto' = full pipeline, "
+    #         "'geoloc' = only Geolocalize step, "
+    #         "'dim' = only Deep Image Matching (requires provided lat/lon)"
+    # )
 
     parser.add_argument(
         "--geoloc_model",
@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument(
         "--gemini_model",
         type=str,
-        default="gemini-2-5-flash",
+        default="gemini-3.1-flash-lite-preview",
         help="Gemini model version to use (e.g., 'gemini-3-flash', 'gemini-2.5-flash' ...)."
     )
 

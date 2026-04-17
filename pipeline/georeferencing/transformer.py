@@ -1,26 +1,17 @@
-"""
-GeoTransformer Module
+﻿"""
+Minimal GeoTransformer
 
-This module exports georeferencing metadata for the UH4D Browser.
-The final output is an XLSX file containing latitude, longitude, height,
-translation, rotation, and scale referenced to the original input model.
-
-Target viewer conventions:
-- Y axis is height
-- Euler rotation order is YXZ
-- No Cesium-specific axis correction is applied
+This module applies the DIM transformation matrix directly to the temporary
+scaled model (*_scaled.glb) and overwrites the same file.
 """
 
-import json
 import logging
 import os
 import sys
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
 import numpy as np
-import requests
 import trimesh
-from pyproj import CRS, Transformer
 
 
 log_level = os.environ.get("LOGLEVEL", "INFO").upper()
@@ -33,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class MatrixUtils:
-    """Utility class for 4x4 transformation matrices."""
+    """Matrix helpers."""
 
     @staticmethod
     def load_matrix(file_path: str) -> np.ndarray:
@@ -43,147 +34,41 @@ class MatrixUtils:
         matrix = np.loadtxt(file_path, delimiter=None)
         if matrix.shape != (4, 4):
             raise ValueError(f"Matrix must be 4x4, found {matrix.shape}")
-        return matrix
+        return matrix.astype(np.float64)
 
     @staticmethod
-    def decompose(matrix: np.ndarray, euler_axes: str = "ryxz") -> Dict[str, np.ndarray]:
+    def decompose_trs(matrix: np.ndarray) -> dict:
         """
-        Decompose a 4x4 matrix into translation, scale, and Euler angles.
-
-        Args:
-            matrix: 4x4 transformation matrix.
-            euler_axes: Euler extraction convention used by trimesh.transformations.
-
-        Returns:
-            Dictionary with translation, scale, and euler_deg.
+        Decompose a 4x4 transform into translation, rotation (Euler XYZ deg), and scale.
         """
-        matrix = np.asarray(matrix, dtype=float)
-        if matrix.shape != (4, 4):
-            raise ValueError("Matrix must be 4x4")
+        m = np.asarray(matrix, dtype=np.float64)
+        if m.shape != (4, 4):
+            raise ValueError(f"Matrix must be 4x4, found {m.shape}")
 
-        translation = matrix[:3, 3].copy()
-        rotation_scale = matrix[:3, :3].copy()
-        scale = np.linalg.norm(rotation_scale, axis=0)
-        safe_scale = np.where(scale == 0, 1.0, scale)
-        rotation_normalized = rotation_scale / safe_scale
+        translation = m[:3, 3].copy()
 
-        rotation_4x4 = np.eye(4)
-        rotation_4x4[:3, :3] = rotation_normalized
+        rs = m[:3, :3].copy()
+        scale = np.linalg.norm(rs, axis=0)
+        safe = np.where(scale == 0.0, 1.0, scale)
+        rotation = rs / safe
 
+        r4 = np.eye(4, dtype=np.float64)
+        r4[:3, :3] = rotation
         try:
-            euler_rad = trimesh.transformations.euler_from_matrix(rotation_4x4, axes=euler_axes)
+            euler_rad = trimesh.transformations.euler_from_matrix(r4, axes="sxyz")
             euler_deg = np.degrees(euler_rad)
-        except Exception as exc:
-            logger.warning(f"Failed to extract Euler angles with {euler_axes}: {exc}")
-            euler_deg = np.array([0.0, 0.0, 0.0])
+        except Exception:
+            euler_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
 
         return {
             "translation": translation,
+            "rotation_euler_deg_xyz": euler_deg,
             "scale": scale,
-            "euler_deg": euler_deg,
         }
-
-    @staticmethod
-    def viewer_to_blender_matrix() -> np.ndarray:
-        """
-        Convert from the GLTF/UH4D viewer frame (Y-up) to Blender frame (Z-up).
-
-        This matches the conversion implicitly used by the current render/export path.
-        """
-        rotation = trimesh.transformations.rotation_matrix(np.radians(-90), [1, 0, 0])
-        mirror = np.eye(4)
-        mirror[1, 1] = -1
-        mirror[2, 2] = -1
-        return mirror @ rotation
-
-    @staticmethod
-    def blender_to_viewer_matrix() -> np.ndarray:
-        """Convert from Blender frame (Z-up) back to the viewer frame (Y-up)."""
-        return np.linalg.inv(MatrixUtils.viewer_to_blender_matrix())
-
-    @staticmethod
-    def uniform_scale_matrix(scale_factor: float) -> np.ndarray:
-        matrix = np.eye(4)
-        matrix[0, 0] = scale_factor
-        matrix[1, 1] = scale_factor
-        matrix[2, 2] = scale_factor
-        return matrix
-
-
-class ElevationService:
-    """Service for fetching elevation data from OpenTopoData API."""
-
-    DEFAULT_DATASET = "srtm30m"
-    API_URL = "https://api.opentopodata.org/v1/{dataset}"
-
-    @staticmethod
-    def get_elevation(lat: float, lon: float, dataset: str = DEFAULT_DATASET) -> float:
-        url = ElevationService.API_URL.format(dataset=dataset)
-        params = {"locations": f"{lat},{lon}"}
-
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            if "results" in data and data["results"]:
-                return data["results"][0].get("elevation", 0)
-
-            logger.warning("⚠️ No elevation data available")
-            return 0
-        except requests.RequestException as exc:
-            logger.error(f"❌ Failed to fetch elevation: {exc}")
-            return 0
-
-
-class GeoidConverter:
-    """Utility class for converting orthometric to ellipsoid heights."""
-
-    @staticmethod
-    def get_geoid_undulation(lat: float, lon: float) -> float:
-        try:
-            crs_wgs84_3d = CRS.from_epsg(4979)
-            crs_geoid = CRS.compound_crs([
-                CRS.from_epsg(4326),
-                CRS.from_epsg(5773),
-            ])
-            transformer = Transformer.from_crs(crs_geoid, crs_wgs84_3d, always_xy=True)
-            _, _, geoid_undulation = transformer.transform(lon, lat, 0.0)
-            return geoid_undulation
-        except Exception as exc:
-            logger.warning(f"⚠️ Failed to compute geoid undulation via PROJ: {exc}")
-            return GeoidConverter._approximate_geoid_undulation(lat, lon)
-
-    @staticmethod
-    def _approximate_geoid_undulation(lat: float, lon: float) -> float:
-        if 35 <= lat <= 72 and -10 <= lon <= 40:
-            return 45.0
-        if 25 <= lat <= 55 and -130 <= lon <= -60:
-            return -30.0
-        if 10 <= lat <= 55 and 60 <= lon <= 150:
-            return -20.0
-        logger.warning("Using fallback global average geoid undulation (0m)")
-        return 0.0
-
-    @staticmethod
-    def orthometric_to_ellipsoid(lat: float, lon: float, orthometric_height: float) -> float:
-        geoid_undulation = GeoidConverter.get_geoid_undulation(lat, lon)
-        ellipsoid_height = orthometric_height + geoid_undulation
-        logger.info(
-            f"Height conversion: {orthometric_height:.2f}m (orthometric) + "
-            f"{geoid_undulation:.2f}m (geoid) = {ellipsoid_height:.2f}m (ellipsoid)"
-        )
-        return ellipsoid_height
 
 
 class ModelAnalyzer:
-    """Utility class for analyzing mesh geometry."""
-
-    @staticmethod
-    def get_centroid(model: Union[trimesh.Scene, trimesh.Trimesh]) -> np.ndarray:
-        if isinstance(model, trimesh.Scene):
-            return model.bounds.mean(axis=0)
-        return model.center_mass
+    """Geometry helpers."""
 
     @staticmethod
     def apply_transform(model: Union[trimesh.Scene, trimesh.Trimesh], matrix: np.ndarray) -> None:
@@ -194,238 +79,283 @@ class ModelAnalyzer:
             model.apply_transform(matrix)
 
 
+class PivotCalculator:
+    """
+    Computes the full transform chain (original mesh → final georeferenced position)
+    and returns the X, Y position of the model pivot after the transformation.
+
+    Transform chain:
+        M_total = R_x(-90°) @ P @ M_dim @ P⁻¹ @ S(metric_scale) @ M_blender
+
+    where:
+        - M_blender     : 4x4 matrix captured from Blender (Step 1)
+        - metric_scale  : uniform scale factor applied in Step 2 (metres/pixel)
+        - M_dim         : raw DIM matrix loaded from transformation.txt
+        - P             : axis-permutation matrix (DIM → trimesh basis)
+        - R_x(-90°)     : fixed -90° rotation around X applied in Step 6
+
+    The pivot (X, Y) is the centre of the model bounding box projected onto the
+    XY plane after M_total has been applied to the input mesh vertices.
+    """
+
+    def __init__(
+        self,
+        input_mesh_path: str,
+        blender_matrix: np.ndarray,
+        metric_scale: float,
+        dim_matrix: np.ndarray,
+    ):
+        """
+        Args:
+            input_mesh_path : Path to the original (pre-pipeline) mesh file.
+            blender_matrix  : 4x4 matrix from Blender Step 1.
+            metric_scale    : Uniform scale factor from Step 2 (metres per pixel).
+            dim_matrix      : Raw 4x4 DIM matrix from transformation.txt.
+        """
+        self.input_mesh_path = input_mesh_path
+        self.blender_matrix = np.asarray(blender_matrix, dtype=np.float64)
+        self.metric_scale = float(metric_scale)
+        self.dim_matrix = np.asarray(dim_matrix, dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # Internal helpers (mirrors GeoTransformer logic)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _scale_matrix(s: float) -> np.ndarray:
+        """Uniform scale 4x4 matrix."""
+        m = np.eye(4, dtype=np.float64)
+        m[0, 0] = m[1, 1] = m[2, 2] = s
+        return m
+
+    @staticmethod
+    def _axis_permutation_matrix() -> np.ndarray:
+        """P: DIM basis → trimesh basis  (X→X, Y→Z, Z→Y)."""
+        p = np.eye(4, dtype=np.float64)
+        p[:3, :3] = np.array(
+            [[1.0, 0.0, 0.0],
+             [0.0, 0.0, 1.0],
+             [0.0, 1.0, 0.0]],
+            dtype=np.float64,
+        )
+        return p
+
+    @staticmethod
+    def _rotation_x_minus90() -> np.ndarray:
+        """4x4 rotation matrix: -90° around X."""
+        return trimesh.transformations.rotation_matrix(np.radians(-90.0), [1.0, 0.0, 0.0])
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def compute_total_matrix(self) -> np.ndarray:
+        """
+        Returns the 4x4 matrix that maps the original input mesh to its final
+        georeferenced position:
+
+            M_total = R_x(-90°) @ (P @ M_dim @ P⁻¹) @ S(metric_scale) @ M_blender
+        """
+        S = self._scale_matrix(self.metric_scale)
+        P = self._axis_permutation_matrix()
+        P_inv = np.linalg.inv(P)
+        M_dim_trimesh = P @ self.dim_matrix @ P_inv
+        R = self._rotation_x_minus90()
+
+        return R @ M_dim_trimesh @ S @ self.blender_matrix
+
+    def compute_pivot_xy(self) -> tuple:
+        """
+        Loads the input mesh, applies M_total, and returns the (X, Y) coordinates
+        of the bounding-box centre in the final frame.
+
+        Returns:
+            (pivot_x, pivot_y, M_total) — floats + 4x4 ndarray
+        """
+        if not os.path.exists(self.input_mesh_path):
+            raise FileNotFoundError(f"Input mesh not found: {self.input_mesh_path}")
+
+        M_total = self.compute_total_matrix()
+
+        mesh = trimesh.load(self.input_mesh_path, force="mesh")
+        if isinstance(mesh, trimesh.Scene):
+            meshes = list(mesh.geometry.values())
+            vertices = np.vstack([m.vertices for m in meshes])
+        else:
+            vertices = mesh.vertices
+
+        # Apply M_total to all vertices
+        ones = np.ones((len(vertices), 1), dtype=np.float64)
+        verts_h = np.hstack([vertices, ones])          # (N, 4)
+        transformed = (M_total @ verts_h.T).T          # (N, 4)
+        xyz = transformed[:, :3]
+
+        # Bounding box centre XY
+        bb_min = xyz.min(axis=0)
+        bb_max = xyz.max(axis=0)
+        centre = (bb_min + bb_max) / 2.0
+
+        pivot_x = float(centre[0])
+        pivot_y = float(centre[1])
+
+        logger.info("📍 Pivot calculation result")
+        logger.info(f"   M_total (shape): {M_total.shape}")
+        trs = MatrixUtils.decompose_trs(M_total)
+        t = trs["translation"]
+        r = trs["rotation_euler_deg_xyz"]
+        s = trs["scale"]
+        logger.info(f"   Total Translation: tx={t[0]:.4f}, ty={t[1]:.4f}, tz={t[2]:.4f}")
+        logger.info(f"   Total Rotation°  : rx={r[0]:.2f}, ry={r[1]:.2f}, rz={r[2]:.2f}")
+        logger.info(f"   Total Scale      : sx={s[0]:.6f}, sy={s[1]:.6f}, sz={s[2]:.6f}")
+        logger.info(f"   Bounding box min : {bb_min}")
+        logger.info(f"   Bounding box max : {bb_max}")
+        logger.info(f"   ➜  Pivot X = {pivot_x:.6f},  Pivot Y = {pivot_y:.6f}")
+
+        return pivot_x, pivot_y, M_total
+
+
+class ElevationService:
+    """Compatibility placeholder (not used in this simplified transformer)."""
+
+    @staticmethod
+    def get_elevation(lat: float, lon: float, dataset: str = "srtm30m") -> float:
+        return 0.0
+
+
+class GeoidConverter:
+    """Compatibility placeholder (not used in this simplified transformer)."""
+
+    @staticmethod
+    def orthometric_to_ellipsoid(lat: float, lon: float, orthometric_height: float) -> float:
+        return float(orthometric_height)
+
+
 class GeoTransformer:
-    """Export UH4D-compatible georeferencing metadata as XLSX."""
+    """
+    Loads *_scaled.glb from working_dir, applies DIM transform from
+    transformation.txt, and overwrites *_scaled.glb.
+    """
 
     def __init__(
         self,
         working_dir: str,
         input_file: str,
         output_folder: str,
-        lat: float,
-        lon: float,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
         pipeline_scale: float = 1.0,
-        viewer_euler_axes: str = "ryxz",
+        **_: dict,
     ):
         self.working_dir = working_dir
         self.input_file = input_file
-        self.lat = float(lat)
-        self.lon = float(lon)
-        self.pipeline_scale = float(pipeline_scale)
-        self.viewer_euler_axes = viewer_euler_axes
-        self.basename = os.path.splitext(os.path.basename(input_file))[0]
-        self.output_folder = os.path.join(output_folder, self.basename)
-        os.makedirs(self.output_folder, exist_ok=True)
+        self.output_folder = output_folder
+        self.lat = lat
+        self.lon = lon
+        self.pipeline_scale = pipeline_scale
 
-    @staticmethod
-    def compute_web_mercator_scale_factor(lat: float) -> float:
-        return 1.0 / np.cos(np.radians(lat))
+    def _find_scaled_model(self) -> Optional[str]:
+        for name in sorted(os.listdir(self.working_dir)):
+            if name.endswith("_scaled.glb"):
+                return os.path.join(self.working_dir, name)
+        return None
 
-    def _load_transformation_matrix(self) -> Optional[np.ndarray]:
+    def _load_dim_matrix(self) -> Optional[np.ndarray]:
         matrix_path = os.path.join(self.working_dir, "transformation.txt")
-        if not os.path.exists(matrix_path):
-            logger.error("⚠️ Missing transformation.txt file")
-            return None
         try:
             return MatrixUtils.load_matrix(matrix_path)
         except Exception as exc:
-            logger.error(f"❌ Failed to load transformation matrix: {exc}")
+            logger.error(f"❌ Failed to load DIM matrix: {exc}")
             return None
 
-    def _load_blender_matrix(self) -> Optional[np.ndarray]:
-        """Load matrix_blender.json exactly as generated by Blender."""
-        matrix_path = os.path.join(self.working_dir, "matrix_blender.json")
-        if not os.path.exists(matrix_path):
-            logger.warning("⚠️ matrix_blender.json not found")
-            return None
-
-        try:
-            with open(matrix_path, "r", encoding="utf-8") as file_handle:
-                return np.array(json.load(file_handle), dtype=np.float64)
-        except Exception as exc:
-            logger.error(f"❌ Failed to load Blender matrix: {exc}")
-            return None
-
-    def _load_scaled_model(self) -> Optional[Union[trimesh.Scene, trimesh.Trimesh]]:
-        model_path = os.path.join(self.working_dir, f"{self.basename}_scaled.glb")
-        if not os.path.exists(model_path):
-            logger.error(f"❌ Model not found: {model_path}")
-            return None
-        try:
-            return trimesh.load(model_path)
-        except Exception as exc:
-            logger.error(f"❌ Failed to load model: {exc}")
-            return None
-
-    def _normalize_dim_matrix(self, matrix_dim: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _dim_to_trimesh_basis_matrix() -> np.ndarray:
         """
-        Rebuild DIM transform as translation + rotation + uniform scale.
+        Axis mapping deduced from DIM -> trimesh observations:
 
-        The DIM output is 2D affine in the Blender map frame. Rebuilding it as a
-        similarity transform avoids exporting shear into the viewer metadata.
+            X_trimesh = X_dim
+            Y_trimesh = Z_dim
+            Z_trimesh = Y_dim
+
+        The full transform is converted with conjugation:
+
+            M_trimesh = P @ M_dim @ P^{-1}
         """
-        params = MatrixUtils.decompose(matrix_dim, euler_axes="sxyz")
-        rotation = trimesh.transformations.euler_matrix(
-            np.radians(params["euler_deg"][0]),
-            np.radians(params["euler_deg"][1]),
-            np.radians(params["euler_deg"][2]),
-            axes="sxyz",
+        p = np.eye(4, dtype=np.float64)
+        p[:3, :3] = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=np.float64,
         )
-        translation = trimesh.transformations.translation_matrix(params["translation"])
-        uniform_scale = MatrixUtils.uniform_scale_matrix(np.mean(params["scale"][:2]))
-        return translation @ rotation @ uniform_scale
+        return p
 
-    def _compute_refinement_translation(self, matrix_dim: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Compute the refinement translation from the temporary scaled mesh.
+    def _dim_to_trimesh_matrix(self, dim_matrix: np.ndarray) -> np.ndarray:
+        """Convert DIM 4x4 transform into trimesh frame via axis permutation."""
+        p = self._dim_to_trimesh_basis_matrix()
+        p_inv = np.linalg.inv(p)
+        return p @ dim_matrix @ p_inv
 
-        The temporary mesh is already the same one used by DIM, so we only need to:
-        1. convert it to Blender frame,
-        2. apply the DIM matrix,
-        3. compute the centroid,
-        4. bring that centroid to the origin.
-        """
-        model = self._load_scaled_model()
-        if model is None:
-            return None
-
-        viewer_to_blender = MatrixUtils.viewer_to_blender_matrix()
-        ModelAnalyzer.apply_transform(model, viewer_to_blender)
-        ModelAnalyzer.apply_transform(model, matrix_dim)
-        centroid = ModelAnalyzer.get_centroid(model)
-        return trimesh.transformations.translation_matrix(-centroid)
-
-    def _export_xlsx(
-        self,
-        latitude: float,
-        longitude: float,
-        height: float,
-        translation: np.ndarray,
-        euler_deg: np.ndarray,
-        scale: np.ndarray,
-        web_mercator_factor: float,
-    ) -> None:
-        try:
-            from openpyxl import Workbook
-        except ImportError as exc:
-            logger.error("❌ openpyxl is not installed. Run: pip install openpyxl")
-            raise exc
-
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Georeferencing"
-
-        headers = [
-            "model_basename",
-            "latitude",
-            "longitude",
-            "height_m_ellipsoid",
-            "translation_x",
-            "translation_y",
-            "translation_z",
-            "rotation_x_deg",
-            "rotation_y_deg",
-            "rotation_z_deg",
-            "scale_x",
-            "scale_y",
-            "scale_z",
-            "euler_convention",
-            "height_reference",
-            "web_mercator_factor",
-        ]
-        sheet.append(headers)
-
-        row = [
-            self.basename,
-            float(latitude),
-            float(longitude),
-            float(height),
-            float(translation[0]),
-            float(translation[1]),
-            float(translation[2]),
-            float(euler_deg[0]),
-            float(euler_deg[1]),
-            float(euler_deg[2]),
-            float(scale[0]),
-            float(scale[1]),
-            float(scale[2]),
-            "YXZ (intrinsic/local, trimesh axes='ryxz')",
-            "WGS84 ellipsoid height (EGM96 geoid conversion applied)",
-            float(web_mercator_factor),
-        ]
-        sheet.append(row)
-
-        output_path = os.path.join(self.output_folder, f"{self.basename}_georef.xlsx")
-        workbook.save(output_path)
-        logger.info(f"✅ UH4D georeferencing XLSX saved to: {output_path}")
+    @staticmethod
+    def _rotation_x_minus_90_matrix() -> np.ndarray:
+        """Return a 4x4 rotation matrix for -90 degrees around X axis."""
+        return trimesh.transformations.rotation_matrix(np.radians(-90.0), [1.0, 0.0, 0.0])
 
     def run(self) -> bool:
-        """
-        Compute UH4D-compatible georeferencing metadata.
-
-        The exported transform is expressed in the viewer frame (Y-up) and uses
-        Euler order YXZ. No Cesium-specific axis corrections are applied.
-        """
-        matrix_dim_raw = self._load_transformation_matrix()
-        if matrix_dim_raw is None:
+        """Apply DIM transform converted to trimesh frame and overwrite *_scaled.glb."""
+        model_path = self._find_scaled_model()
+        if model_path is None:
+            logger.error("❌ No *_scaled.glb found in working directory.")
             return False
 
-        matrix_dim = self._normalize_dim_matrix(matrix_dim_raw)
-        blender_matrix = self._load_blender_matrix()
-
-        translation_refinement = self._compute_refinement_translation(matrix_dim)
-        if translation_refinement is None:
+        dim_matrix = self._load_dim_matrix()
+        if dim_matrix is None:
             return False
 
-        viewer_to_blender = MatrixUtils.viewer_to_blender_matrix()
-        blender_to_viewer = MatrixUtils.blender_to_viewer_matrix()
-
-        pipeline_scale_matrix = MatrixUtils.uniform_scale_matrix(self.pipeline_scale)
-        web_mercator_factor = self.compute_web_mercator_scale_factor(self.lat)
-        web_mercator_scale = MatrixUtils.uniform_scale_matrix(1.0 / web_mercator_factor)
-
-        # Temporary scaled model in Blender frame:
-        #   S_pipeline @ M_blender @ C_viewer_to_blender @ original_model
-        # Final exported viewer transform:
-        #   C_blender_to_viewer @ S_webmercator @ T_refine @ M_dim @ (...above...)
-        inner_chain = matrix_dim
-        if blender_matrix is not None:
-            inner_chain = inner_chain @ pipeline_scale_matrix @ blender_matrix @ viewer_to_blender
-        else:
-            logger.warning(
-                "⚠️ Exporting TRS relative to the temporary scaled mesh because "
-                "matrix_blender.json is missing."
-            )
-            inner_chain = inner_chain @ viewer_to_blender
-
-        final_matrix = (
-            blender_to_viewer @
-            web_mercator_scale @
-            translation_refinement @
-            inner_chain
-        )
-
-        trs = MatrixUtils.decompose(final_matrix, euler_axes=self.viewer_euler_axes)
-
-        elevation_orthometric = ElevationService.get_elevation(self.lat, self.lon)
-        elevation_ellipsoid = GeoidConverter.orthometric_to_ellipsoid(
-            self.lat,
-            self.lon,
-            elevation_orthometric,
-        )
-
+        # Print DIM matrix as Translation / Rotation / Scale
         try:
-            self._export_xlsx(
-                latitude=self.lat,
-                longitude=self.lon,
-                height=elevation_ellipsoid,
-                translation=trs["translation"],
-                euler_deg=trs["euler_deg"],
-                scale=trs["scale"],
-                web_mercator_factor=web_mercator_factor,
-            )
+            trs = MatrixUtils.decompose_trs(dim_matrix)
+            t = trs["translation"]
+            r = trs["rotation_euler_deg_xyz"]
+            s = trs["scale"]
+            logger.info("📐 DIM matrix decomposition (raw transformation.txt)")
+            logger.info(f"   Translation: tx={t[0]:.6f}, ty={t[1]:.6f}, tz={t[2]:.6f}")
+            logger.info(f"   Rotation   : rx={r[0]:.6f}°, ry={r[1]:.6f}°, rz={r[2]:.6f}°  (Euler XYZ)")
+            logger.info(f"   Scale      : sx={s[0]:.6f}, sy={s[1]:.6f}, sz={s[2]:.6f}")
         except Exception as exc:
-            logger.error(f"❌ Failed to export XLSX: {exc}")
-            return False
+            logger.warning(f"⚠️ Failed to decompose DIM matrix into TRS: {exc}")
 
-        return True
+        logger.info(f"🔧 Applying DIM transform to: {model_path}")
+        try:
+            model = trimesh.load(model_path)
+
+            # 1) Convert DIM matrix to trimesh basis using explicit axis mapping, then apply
+            matrix_model = self._dim_to_trimesh_matrix(dim_matrix)
+
+            try:
+                trs_mapped = MatrixUtils.decompose_trs(matrix_model)
+                t2 = trs_mapped["translation"]
+                r2 = trs_mapped["rotation_euler_deg_xyz"]
+                s2 = trs_mapped["scale"]
+                logger.info("📐 Converted matrix decomposition (DIM -> trimesh)")
+                logger.info(f"   Translation: tx={t2[0]:.6f}, ty={t2[1]:.6f}, tz={t2[2]:.6f}")
+                logger.info(f"   Rotation   : rx={r2[0]:.6f}°, ry={r2[1]:.6f}°, rz={r2[2]:.6f}°  (Euler XYZ)")
+                logger.info(f"   Scale      : sx={s2[0]:.6f}, sy={s2[1]:.6f}, sz={s2[2]:.6f}")
+            except Exception as exc:
+                logger.warning(f"⚠️ Failed to decompose converted matrix into TRS: {exc}")
+
+            ModelAnalyzer.apply_transform(model, matrix_model)
+            logger.info("✅ Applied DIM transform with DIM->trimesh axis conversion")
+
+            # 2) Apply additional fixed rotation around X axis (-90 deg)
+            rot_x_m90 = self._rotation_x_minus_90_matrix()
+            ModelAnalyzer.apply_transform(model, rot_x_m90)
+            logger.info("✅ Applied extra rotation: X axis = -90°")
+
+            model.export(model_path)
+            logger.info(f"✅ Overwritten transformed model: {model_path}")
+            return True
+        except Exception as exc:
+            logger.error(f"❌ Failed to transform/export model: {exc}")
+            return False

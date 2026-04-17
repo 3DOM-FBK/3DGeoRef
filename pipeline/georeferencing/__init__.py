@@ -14,7 +14,8 @@ from .transformer import (
     ElevationService,
     GeoidConverter,
     ModelAnalyzer,
-    GeoTransformer
+    GeoTransformer,
+    PivotCalculator,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     'GeoidConverter',
     'ModelAnalyzer',
     'GeoTransformer',
+    'PivotCalculator',
 ]

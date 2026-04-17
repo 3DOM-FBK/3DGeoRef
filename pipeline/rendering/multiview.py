@@ -7,6 +7,7 @@ import math
 import argparse
 import platform
 import json
+import numpy as np
 from mathutils import Matrix, Vector
 
 
@@ -492,11 +493,6 @@ def postprocess_model(output_path, filename, corners_world, target_x):
     # Convert matrix to list for JSON serialization
     matrix_list = [list(row) for row in final_matrix]
     
-    # Save matrix to JSON file
-    json_path = os.path.join(output_path, "matrix_blender.json")
-    with open(json_path, 'w') as f:
-        json.dump(matrix_list, f, indent=2)
-    
     # Export GLB
     bpy.ops.object.select_all(action='DESELECT')
     for obj in meshes:
@@ -507,6 +503,8 @@ def postprocess_model(output_path, filename, corners_world, target_x):
         use_selection=True,
         export_yup=True
     )
+
+    return matrix_list
     
 
 # ===== Function: get_ortho_camera_corners =====
@@ -587,6 +585,26 @@ def get_world_matrix(obj):
     return matrix
 
 
+def extract_blender_transformation_matrix(blender_matrix_json_path):
+    """
+    Estrae la matrice di trasformazione completa applicata da Blender durante postprocess_model.
+    
+    La matrice è già calcolata e salvata in matrix_blender.json durante postprocess_model().
+    Questa funzione la carica e la restituisce come numpy array 4x4.
+    
+    Args:
+        blender_matrix_json_path (str): percorso a matrix_blender.json
+    
+    Returns:
+        np.ndarray: Matrice 4x4 di trasformazione Blender (TRS composita)
+    """
+    with open(blender_matrix_json_path, 'r') as f:
+        matrix_list = json.load(f)
+    
+    M_blender = np.array(matrix_list, dtype=np.float32)
+    return M_blender
+
+
 # ===== Function: main =====
 if __name__ == "__main__":
     args = parse_arguments()
@@ -617,5 +635,9 @@ if __name__ == "__main__":
 
     remove_cameras()
 
-    postprocess_model(output_folder, base_name+"_scaled.glb", corners_world, res_x)
+    matrix_list = postprocess_model(output_folder, base_name+"_scaled.glb", corners_world, res_x)
+    
+    # Stampa la matrice su stdout con tag speciale per essere letta da core.py
+    print("MATRIX_BLENDER:" + json.dumps(matrix_list))
+
     clear_scene()

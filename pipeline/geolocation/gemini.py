@@ -1,15 +1,20 @@
 import os
 import json
+import logging
 from PIL import Image
 import google.genai as genai
 from google.genai.types import GenerateContentConfig
 from collections import Counter
 import time
 
-# DEFAULT_MODEL = "gemini-3.0-flash"
-# DEFAULT_MODEL = "gemini-2.0-flash-lite"
-DEFAULT_MODEL = "gemini-3-flash-preview"
-# DEFAULT_MODEL = "gemini-1.5-flash"
+# Suppress verbose logs from Google libraries
+logging.getLogger("google").setLevel(logging.ERROR)
+logging.getLogger("google.genai").setLevel(logging.ERROR)
+logging.getLogger("google.auth").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+logging.getLogger("requests").setLevel(logging.ERROR)
+
+DEFAULT_MODEL = "gemini-3-flash-preview" # See here for available models: https://ai.google.dev/gemini-api/docs/models
 
 # 1. Configuration and Initialization
 # Make sure the GEMINI_API_KEY environment variable is set.
