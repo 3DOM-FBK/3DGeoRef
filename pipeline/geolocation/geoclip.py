@@ -1,9 +1,11 @@
+"""GeoCLIP-based batch geolocation utilities."""
+
 import os
-import json
 import gc
 import torch
 from geoclip import GeoCLIP
 from collections import Counter
+from typing import Optional
 
 
 class GeoClipBatchPredictor:
@@ -13,12 +15,11 @@ class GeoClipBatchPredictor:
     and returns the most common predicted GPS location among all images.
     """
 
-    def __init__(self, exclude_keywords=None, top_k: int = 3):
+    def __init__(self, exclude_keywords: Optional[list[str]] = None, top_k: int = 3):
         """
         Initializes the predictor.
 
         Args:
-            model (GeoCLIP): An instance of the GeoCLIP model or compatible geolocation model.
             exclude_keywords (list[str], optional): Keywords to exclude from image filenames. Defaults to ["top_view"].
             top_k (int, optional): Number of top GPS predictions to retrieve for each image. Defaults to 3.
         """
@@ -26,7 +27,7 @@ class GeoClipBatchPredictor:
         self.top_k = top_k
         self.exclude_keywords = exclude_keywords or ["top_view"]
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """
         Explicitly releases the GeoCLIP model from memory.
         This is important to free GPU/CPU memory after predictions are complete.
@@ -35,7 +36,7 @@ class GeoClipBatchPredictor:
             # Move model to CPU first (if on GPU) to free VRAM
             try:
                 self.model.cpu()
-            except:
+            except Exception:
                 pass
             
             # Delete the model
@@ -85,7 +86,7 @@ class GeoClipBatchPredictor:
         for filename in image_files:
             image_path = os.path.join(folder_path, filename)
             try:
-                gps_preds, probs = self.model.predict(image_path, top_k=self.top_k)
+                gps_preds, _probs = self.model.predict(image_path, top_k=self.top_k)
                 all_predictions.extend([tuple(gps) for gps in gps_preds])
             except Exception:
                 continue

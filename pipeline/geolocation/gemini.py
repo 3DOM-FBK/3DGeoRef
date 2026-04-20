@@ -1,3 +1,5 @@
+"""Gemini-based geolocation and scene dimension estimation utilities."""
+
 import os
 import json
 import logging
@@ -6,6 +8,7 @@ import google.genai as genai
 from google.genai.types import GenerateContentConfig
 from collections import Counter
 import time
+from typing import Optional
 
 # Suppress verbose logs from Google libraries
 for noisy_logger in (
@@ -68,7 +71,7 @@ class GeminiGeolocator:
         )
 
 
-    def geolocate_image(self, image_path: str):
+    def geolocate_image(self, image_path: str) -> Optional[dict]:
         """
         Sends an image to Gemini to obtain its estimated GPS coordinates.
         
@@ -197,7 +200,7 @@ class GeminiDimensionEstimator:
              "Example: {\"dimension_meters\": 25.5}"
         )
 
-    def estimate_dimension(self, image_path: str) -> float:
+    def estimate_dimension(self, image_path: str) -> Optional[float]:
         """
         Estimates the dimension (in meters) of the zone present in the image.
 

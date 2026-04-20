@@ -9,19 +9,10 @@ This module provides centralized coordinate transformation functions:
 
 import logging
 import math
-import os
-import sys
 from typing import Optional, Tuple
 
 from pyproj import Transformer
 
-# Configure logging
-log_level = os.environ.get("LOGLEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level),
-    format='%(asctime)s - %(levelname)-8s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
 logger = logging.getLogger(__name__)
 
 

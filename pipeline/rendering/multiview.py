@@ -615,16 +615,16 @@ def get_world_matrix(obj):
 
 def extract_blender_transformation_matrix(blender_matrix_json_path):
     """
-    Estrae la matrice di trasformazione completa applicata da Blender durante postprocess_model.
-    
-    La matrice è già calcolata e salvata in matrix_blender.json durante postprocess_model().
-    Questa funzione la carica e la restituisce come numpy array 4x4.
-    
+    Load the full transformation matrix applied by Blender in postprocess_model.
+
+    The matrix is produced and saved in matrix_blender.json during
+    postprocess_model(). This helper loads it back as a 4x4 NumPy array.
+
     Args:
-        blender_matrix_json_path (str): percorso a matrix_blender.json
-    
+        blender_matrix_json_path (str): Path to matrix_blender.json.
+
     Returns:
-        np.ndarray: Matrice 4x4 di trasformazione Blender (TRS composita)
+        np.ndarray: 4x4 Blender transformation matrix (composed TRS).
     """
     with open(blender_matrix_json_path, 'r') as f:
         matrix_list = json.load(f)
@@ -665,9 +665,9 @@ if __name__ == "__main__":
 
     matrix_list, pivot_pos = postprocess_model(output_folder, base_name+"_scaled.glb", corners_world, res_x)
     
-    # Stampa la matrice su stdout con tag speciale per essere letta da core.py
+    # Print tagged values for pipeline/core.py to parse from Blender stdout.
     print("MATRIX_BLENDER:" + json.dumps(matrix_list))
-    # Stampa la posizione del pivot empty (in unità Blender pre-metric-scale)
+    # Pivot position before metric scaling (Blender units).
     print("PIVOT_BLENDER:" + json.dumps(pivot_pos))
 
     clear_scene()

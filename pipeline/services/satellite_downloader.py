@@ -1,22 +1,35 @@
-import requests
-from urllib.parse import urlencode
-import numpy as np
-import os
-from PIL import Image
-import rasterio
-from rasterio.transform import from_bounds
-from rasterio.transform import from_origin
+"""Satellite tile download and GeoTIFF assembly utilities."""
+
+import logging
 import math
-import platform
-import shutil
+import os
+
+import numpy as np
+import rasterio
+import requests
+from PIL import Image
 from pyproj import Transformer
-import time
-import sys
+from rasterio.transform import from_origin
+
 from pipeline.utils.coordinate_transforms import CoordinateTransforms
 
 
-class satelliteTileDownloader():
-    def __init__(self, center_lat, center_lon, area_size_m, zoom, output_folder):
+logger = logging.getLogger(__name__)
+
+
+class SatelliteTileDownloader:
+    """Download satellite tiles from Mapbox and merge them into a GeoTIFF."""
+
+    def __init__(self, center_lat: float, center_lon: float, area_size_m: int, zoom: int, output_folder: str):
+        """Initialize downloader parameters.
+
+        Args:
+            center_lat: Center latitude in decimal degrees.
+            center_lon: Center longitude in decimal degrees.
+            area_size_m: Side length of the target area in meters.
+            zoom: Preferred zoom level.
+            output_folder: Directory where intermediate and output files are written.
+        """
         self.api_key = os.environ.get("MAPBOX_API_KEY")
         self.map_type = "satellite"
         self.center_lat = float(center_lat)
@@ -25,24 +38,20 @@ class satelliteTileDownloader():
         self.zoom = int(zoom)
         self.output_folder = output_folder
 
-
-    # ===== Helper Functions: clamp_lat =====
-    def clamp_lat(self, lat):
-        # Limiti validi per Web Mercator
+    def clamp_lat(self, lat: float) -> float:
+        """Clamp latitude to the valid Web Mercator range."""
         return max(min(lat, 85.05112878), -85.05112878)
 
-
-    # ===== Helper Functions: normalize_lng =====
-    def normalize_lng(self, lng):
+    def normalize_lng(self, lng: float) -> float:
+        """Normalize longitude to the [-180, 180] range."""
         while lng < -180:
             lng += 360
         while lng > 180:
             lng -= 360
         return lng
 
-
-    # ===== Function: lat_lng_to_tile =====
-    def lat_lng_to_tile(self, lat, lng, zoom):
+    def lat_lng_to_tile(self, lat: float, lng: float, zoom: int) -> tuple[int, int]:
+        """Convert latitude/longitude to XYZ tile coordinates at a given zoom."""
         lat = self.clamp_lat(lat)
         lng = self.normalize_lng(lng)
 
@@ -56,8 +65,7 @@ class satelliteTileDownloader():
         return x_tile, y_tile
 
 
-    # ===== Function: tile_to_lat_lng =====
-    def tile_to_lat_lng(self, x, y, zoom):
+    def tile_to_lat_lng(self, x: int, y: int, zoom: int) -> tuple[float, float]:
         """
         Converts Google Maps tile coordinates (x, y) at a given zoom level
         into geographic latitude and longitude in decimal degrees.
@@ -93,11 +101,11 @@ class satelliteTileDownloader():
         Download individual tiles (256x256) for a specified area using the MapBox Raster API.
 
         Args:
-            center_lat (float): Latitude of the centre of the area.
-            center_lng (float): Longitude of the centre of the area.
-            area_side_meters (float): Length of the side of the square area in metres.
+            center_lat (float): Latitude of the center of the area.
+            center_lng (float): Longitude of the center of the area.
+            area_side_meters (float): Length of the side of the square area in meters.
             zoom_level (int): Zoom level.
-            output_folder (str): Folder where you save your tiles.
+            output_folder (str): Folder where tiles are saved.
             map_type (str): Map type (e.g., 'satellite', 'roadmap', 'terrain', 'hybrid').
         """
         half_side_m = float(area_side_meters) / 2
@@ -122,9 +130,6 @@ class satelliteTileDownloader():
 
         os.makedirs(output_folder, exist_ok=True)
 
-        downloaded_count = 0
-        total_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
-
         # Use Mapbox as alternative source
         success = True
         for x in range(min_x, max_x+1):
@@ -146,8 +151,6 @@ class satelliteTileDownloader():
         """Delegated to CoordinateTransforms centralized function."""
         return CoordinateTransforms.meters_per_pixel(zoom, latitude)
 
-
-    # ===== Function: merge_tiles_to_geotiff =====
     def merge_tiles_to_geotiff(self, tile_folder, tile_size_px, zoom_level, output_filename, min_x, min_y):
         """
         Merges PNG tiles and creates a georeferenced GeoTIFF using centre and resolution.
@@ -182,7 +185,7 @@ class satelliteTileDownloader():
         width_px = tiles_x * tile_size_px
         height_px = tiles_y * tile_size_px
 
-        # --- SAFETY CHECK: Prevent Decompression Bomb DOS Attack ---
+        # --- Safety checks to prevent pathological image sizes ---
         # Calculate expected size based on area_size_m
         # Ground resolution (m/px)
         res_m_px = self.meters_per_pixel(zoom_level, self.center_lat)
@@ -201,10 +204,9 @@ class satelliteTileDownloader():
         current_area_px = width_px * height_px
 
         # Check relative to expected size
-        if current_area_px > max_allowed_area_px and current_area_px > 10_000_000: # Only check if image is reasonably big (>10MP)
-             # But if it's smaller than the hard limit, we might allow it if user asked for it? 
-             # The user asked to filter bad images that are obviously wrong.
-             pass
+        if current_area_px > max_allowed_area_px and current_area_px > 10_000_000:
+            # Preserve backward-compatible behavior while keeping this check explicit.
+            pass
 
         if current_area_px > HARD_LIMIT_PIXELS:
             error_msg = (
@@ -212,25 +214,25 @@ class satelliteTileDownloader():
                 f"Limit is {HARD_LIMIT_PIXELS} px. "
                 f"Expected approx {int(expected_px_side)}x{int(expected_px_side)} based on area_size_m={self.area_size_m}."
             )
-            print(f"❌ ERROR: {error_msg}")
+            logger.error(error_msg)
             raise ValueError(error_msg)
         
         # Check against expected size (if > 10x expected, it's likely a bug)
-        if current_area_px > (expected_area_px * 25): # 5x linear dimension mismatch
-             error_msg = (
+        if current_area_px > (expected_area_px * 25):  # 5x linear dimension mismatch
+            error_msg = (
                 f"Generated image anomaly: {width_px}x{height_px} ({current_area_px} px) "
                 f"is way larger than expected {int(expected_px_side)}x{int(expected_px_side)}. "
                 f"Check lat/lon or tile calculation."
             )
-             print(f"❌ ERROR: {error_msg}")
-             raise ValueError(error_msg)
-        # -----------------------------------------------------------
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        # ----------------------------------------------------------
 
         try:
             mosaic = Image.new('RGB', (width_px, height_px))
         except Image.DecompressionBombError:
-             print(f"❌ ERROR: Image too large, exceeded PIL limit.")
-             raise
+            logger.error("Image too large: PIL DecompressionBombError triggered.")
+            raise
 
         for x, y, filename in tiles:
             img = Image.open(os.path.join(tile_folder, filename))
@@ -264,10 +266,12 @@ class satelliteTileDownloader():
             dst.write(np.array(b), 3)
 
 
-    # ===== Function: run_pipeline =====
-    def run_pipeline(self):
+    def run_pipeline(self) -> bool:
         """
-        Main pipeline to download tiles and create GeoTIFF.
+        Run tile download and merge steps to produce the output GeoTIFF.
+
+        Returns:
+            True on success, False otherwise.
         """
         tile_tmp_dir = os.path.join(self.output_folder, "tile")
         success = False
@@ -300,3 +304,7 @@ class satelliteTileDownloader():
         )
 
         return True
+
+
+# Backward compatibility alias used across the project.
+satelliteTileDownloader = SatelliteTileDownloader

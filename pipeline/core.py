@@ -1,3 +1,5 @@
+"""Pipeline orchestration for 3D model georeferencing and metadata export."""
+
 import os
 import sys
 import subprocess
@@ -75,7 +77,7 @@ class PipelineProcessor:
     # STEP 1 – Synthetic views via Blender
     # -------------------------------------------------------------------------
 
-    def generate_synthetic_views(self, streetviews: Optional[int] = None) -> bool:
+    def generate_synthetic_views(self, streetviews: Optional[int] = None) -> tuple[bool, Optional[np.ndarray], Optional[list]]:
         """
         Launches Blender in background mode to:
           - Import the input 3D model
@@ -89,7 +91,10 @@ class PipelineProcessor:
             streetviews (int, optional): Number of street-view cameras around the model.
 
         Returns:
-            bool: True if Blender exited successfully, False otherwise.
+            tuple:
+                - success flag
+                - Blender 4x4 matrix (or None)
+                - pivot position list (or None)
         """
         logger.info("🔧 [Step 1] Generating synthetic views with Blender...")
 
@@ -862,7 +867,6 @@ class PipelineProcessor:
 
         try:
             trs = MatrixUtils.decompose_trs(m_total)
-            t = trs["translation"]
             r = trs["rotation_euler_deg_xyz"]
             s = trs["scale"]
         except Exception as e:
@@ -904,7 +908,6 @@ class PipelineProcessor:
             "pcss_geolocation_rotation": f"{viewer_rot_x:.6f};{viewer_rot_y:.6f};{viewer_rot_z:.6f}",
             "pcss_geolocation_rotation_order": "YXZ",
             "pcss_geolocation_scale": f"{scale_x:.6f};{scale_y:.6f};{scale_z:.6f}",
-            "test": "test",  # Placeholder for additional metadata fields if needed
         }
 
         xlsx_path = self._export_metadata_xlsx(metadata)

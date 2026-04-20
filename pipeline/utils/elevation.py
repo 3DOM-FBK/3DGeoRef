@@ -7,20 +7,11 @@ This module provides centralized elevation data fetching and geoid conversion se
 """
 
 import logging
-import os
-import sys
 from typing import Optional
 
 import requests
 from pyproj import CRS, Transformer
 
-# Configure logging
-log_level = os.environ.get("LOGLEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level),
-    format='%(asctime)s - %(levelname)-8s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
 logger = logging.getLogger(__name__)
 
 

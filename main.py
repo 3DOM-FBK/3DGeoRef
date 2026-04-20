@@ -1,19 +1,21 @@
+"""Command-line entry point for the 3DGeoRef pipeline."""
+
 import argparse
 import os
 
 
 
-# ===== Function: parse_args =====
 def parse_args():
+    """Parse command-line arguments for the pipeline runner."""
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input_file", required=True, help="Path to input .glb/.gltf file")
     parser.add_argument("-o", "--output_folder", required=True, help="Folder to save outputs")
-    parser.add_argument("--streetviews", type=str, default="5", help="Number of streetview-style renderings around the model (default: 5)")
-    parser.add_argument("--nr_prediction", type=str, default="1", help="Number of gps prediction (default: 1) - GeoClip only")
-    parser.add_argument("--area_size", type=str, default="500", help="Side length of the square area to download.")
-    parser.add_argument("--zoom", type=str, default="18", help="Zoom level (e.g., 18 or 20).")
-    parser.add_argument("--lat", type=str, default=None, help="Latitude of 3d model")
-    parser.add_argument("--lon", type=str, default=None, help="Longitude of 3d mode")
+    parser.add_argument("--streetviews", type=int, default=5, help="Number of street-view style renderings around the model (default: 5)")
+    parser.add_argument("--nr_prediction", type=int, default=1, help="Number of GPS predictions (default: 1) - GeoCLIP only")
+    parser.add_argument("--area_size", type=int, default=500, help="Side length of the square area to download.")
+    parser.add_argument("--zoom", type=int, default=18, help="Zoom level (for example 18 or 20).")
+    parser.add_argument("--lat", type=float, default=None, help="Latitude of the 3D model")
+    parser.add_argument("--lon", type=float, default=None, help="Longitude of the 3D model")
     parser.add_argument("--ortho", type=str, default=None, help="Orthophoto image to use for georeferencing")
     parser.add_argument(
         "--use_dino",
@@ -83,7 +85,6 @@ def parse_args():
     return parser.parse_args()
 
 
-# ===== Function: main =====
 if __name__ == "__main__":
     args = parse_args()
     os.environ["LOGLEVEL"] = args.loglevel.upper()

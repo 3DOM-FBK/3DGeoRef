@@ -7,21 +7,11 @@ scaled model (*_scaled.glb) and overwrites the same file.
 
 import logging
 import os
-import sys
 from typing import Optional, Union
 
 import numpy as np
 import trimesh
 
-from pipeline.utils.elevation import ElevationService, GeoidConverter
-
-
-log_level = os.environ.get("LOGLEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level),
-    format='%(asctime)s - %(levelname)-8s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
 logger = logging.getLogger(__name__)
 
 

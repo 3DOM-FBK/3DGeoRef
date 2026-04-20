@@ -6,8 +6,9 @@ This module provides external service integrations, including:
 - Other external API services
 """
 
-from .satellite_downloader import satelliteTileDownloader
+from .satellite_downloader import SatelliteTileDownloader, satelliteTileDownloader
 
 __all__ = [
+    'SatelliteTileDownloader',
     'satelliteTileDownloader',
 ]
