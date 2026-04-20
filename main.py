@@ -1,5 +1,5 @@
 import argparse
-from pipeline.core import PipelineProcessor
+import os
 
 
 
@@ -71,6 +71,14 @@ def parse_args():
         default=False,
         help="Delete temporary working directory in /tmp after execution (default: keep)."
     )
+
+    parser.add_argument(
+        "--loglevel",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default=os.environ.get("LOGLEVEL", "INFO").upper(),
+        help="Logging level (default: INFO). Use DEBUG for verbose diagnostics."
+    )
     
     return parser.parse_args()
 
@@ -78,6 +86,8 @@ def parse_args():
 # ===== Function: main =====
 if __name__ == "__main__":
     args = parse_args()
+    os.environ["LOGLEVEL"] = args.loglevel.upper()
 
+    from pipeline.core import PipelineProcessor
     processor = PipelineProcessor(args)
     processor.run_pipeline()

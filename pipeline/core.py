@@ -8,7 +8,9 @@ import numpy as np
 from typing import Optional
 from PIL import Image
 from pipeline.services import satelliteTileDownloader
-from pipeline.georeferencing import georef_dim, DinoImageMatcher, OrthoCropper, GeoTransformer, PivotCalculator, MatrixUtils
+from pipeline.georeferencing import georef_dim, DinoImageMatcher, OrthoCropper, GeoTransformer, MatrixUtils
+from pipeline.utils.elevation import ElevationService
+from pipeline.utils.coordinate_transforms import CoordinateTransforms
 
 # Logger configuration
 LOG_LEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
@@ -20,13 +22,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Suppress verbose logs from external libraries
-logging.getLogger("google").setLevel(logging.ERROR)
-logging.getLogger("google.genai").setLevel(logging.ERROR)
-logging.getLogger("google.auth").setLevel(logging.ERROR)
-logging.getLogger("google.api_core").setLevel(logging.ERROR)
-logging.getLogger("urllib3").setLevel(logging.ERROR)
-logging.getLogger("requests").setLevel(logging.ERROR)
-logging.getLogger("PIL").setLevel(logging.WARNING)
+for noisy_logger in (
+    "google",
+    "google.genai",
+    "google.auth",
+    "google.api_core",
+    "urllib3",
+    "requests",
+    "httpx",
+    "httpcore",
+    "PIL",
+):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING if LOG_LEVEL == "DEBUG" else logging.ERROR)
 
 
 class PipelineProcessor:
@@ -60,9 +67,9 @@ class PipelineProcessor:
             os.environ["MAPBOX_API_KEY"] = self.args.mapbox_api_key
 
         logger.info("Pipeline initialized.")
-        logger.info(f"  Input File   : {args.input_file}")
-        logger.info(f"  Working Dir  : {self.working_dir}")
-        logger.info(f"  Output Folder: {args.output_folder}")
+        logger.debug(f"  Input File   : {args.input_file}")
+        logger.debug(f"  Working Dir  : {self.working_dir}")
+        logger.debug(f"  Output Folder: {args.output_folder}")
 
     # -------------------------------------------------------------------------
     # STEP 1 – Synthetic views via Blender
@@ -111,27 +118,32 @@ class PipelineProcessor:
                 logger.error(f"❌ Blender exited with unexpected code: {result.returncode}")
                 return False, None
 
-            # Parse matrix from stdout (tagged line)
+            # Parse matrix and pivot position from stdout (tagged lines)
             M_blender = None
+            pivot_blender = None
             for line in result.stdout.splitlines():
                 if line.startswith("MATRIX_BLENDER:"):
                     matrix_list = json.loads(line[len("MATRIX_BLENDER:"):])
                     M_blender = np.array(matrix_list, dtype=np.float64)
-                    break
+                if line.startswith("PIVOT_BLENDER:"):
+                    pivot_blender = json.loads(line[len("PIVOT_BLENDER:"):])
 
             if M_blender is None:
                 logger.error("❌ MATRIX_BLENDER tag not found in Blender stdout.")
-                return False, None
+                return False, None, None
+
+            if pivot_blender is None:
+                logger.warning("⚠️ PIVOT_BLENDER tag not found in Blender stdout.")
 
             logger.info("✅ Blender process finished.")
-            return True, M_blender
+            return True, M_blender, pivot_blender
 
         except FileNotFoundError:
             logger.error("❌ 'blender' executable not found. Is Blender installed and in PATH?")
-            return False, None
+            return False, None, None
         except Exception as e:
             logger.error(f"❌ Error running Blender: {e}")
-            return False, None
+            return False, None, None
 
     # -------------------------------------------------------------------------
     # STEP 1b – Load Blender transformation matrix
@@ -161,7 +173,7 @@ class PipelineProcessor:
             return None
 
         logger.info("✅ Blender transformation matrix received successfully.")
-        logger.info(f"\n   Matrix (4x4):\n{M}\n")
+        logger.debug(f"\n   Matrix (4x4):\n{M}\n")
         return M
 
     # -------------------------------------------------------------------------
@@ -245,6 +257,121 @@ class PipelineProcessor:
             logger.error(f"❌ Error scaling 3D model: {e}")
             return False
 
+    def _find_scaled_glb_path(self) -> Optional[str]:
+        """Find the current *_scaled.glb path in working directory."""
+        for f in sorted(os.listdir(self.working_dir)):
+            if f.endswith("_scaled.glb"):
+                return os.path.join(self.working_dir, f)
+        return None
+
+    def _extract_pivot_center_from_glb(self, glb_path: str) -> Optional[np.ndarray]:
+        """
+        Load a GLB scene and return the world-space center of the submesh named 'pivot'.
+
+        Matching is case-insensitive and checks both scene node names and geometry names.
+        """
+        import trimesh
+
+        try:
+            scene = trimesh.load(glb_path, force="scene")
+        except Exception as e:
+            logger.error(f"❌ Failed to load GLB for pivot extraction: {e}")
+            return None
+
+        if not isinstance(scene, trimesh.Scene):
+            logger.error("❌ Loaded GLB is not a Scene; cannot isolate submesh 'pivot'.")
+            return None
+
+        pivot_vertices = []
+        for node_name in scene.graph.nodes_geometry:
+            geom_name = scene.graph[node_name][1]
+            node_l = str(node_name).lower()
+            geom_l = str(geom_name).lower()
+
+            if "pivot" not in node_l and "pivot" not in geom_l:
+                continue
+
+            geom = scene.geometry.get(geom_name)
+            if geom is None:
+                continue
+
+            transform, _ = scene.graph.get(node_name)
+            mesh_world = geom.copy()
+            mesh_world.apply_transform(transform)
+            pivot_vertices.append(np.asarray(mesh_world.vertices, dtype=np.float64))
+
+        if not pivot_vertices:
+            logger.error("❌ Submesh 'pivot' not found in *_scaled.glb scene graph.")
+            return None
+
+        verts = np.vstack(pivot_vertices)
+        center = verts.mean(axis=0)
+        return center
+
+    @staticmethod
+    def _epsg3857_to_latlon(x: float, y: float) -> Optional[tuple]:
+        """Convert Web Mercator XY to geographic latitude/longitude (delegated to CoordinateTransforms)."""
+        return CoordinateTransforms.epsg3857_to_latlon(x, y)
+
+    def _compute_total_transform_matrix(
+        self,
+        blender_matrix: np.ndarray,
+        metric_scale: float,
+        transformer: GeoTransformer,
+    ) -> Optional[np.ndarray]:
+        """
+        Compute the full transform applied to the original input GLB.
+
+        Chain (must mirror current GeoTransformer behavior):
+            M_total = R_x(-90) @ M_dim_trimesh @ S_metric @ M_blender
+        """
+        try:
+            dim_matrix = MatrixUtils.load_matrix(os.path.join(self.working_dir, "transformation.txt"))
+            m_dim_trimesh = transformer._dim_to_trimesh_matrix(dim_matrix)
+            r_x_m90 = transformer._rotation_x_minus_90_matrix()
+
+            s_metric = np.eye(4, dtype=np.float64)
+            s_metric[0, 0] = s_metric[1, 1] = s_metric[2, 2] = float(metric_scale)
+
+            return r_x_m90 @ m_dim_trimesh @ s_metric @ blender_matrix
+        except Exception as e:
+            logger.error(f"❌ Failed to compute total input->output transform: {e}")
+            return None
+
+
+
+    def _export_metadata_xlsx(
+        self,
+        metadata: dict,
+        filename: str = "metadata.xlsx",
+    ) -> Optional[str]:
+        """Export one-row metadata workbook to output/<basename>/metadata.xlsx."""
+        out_dir = os.path.join(self.args.output_folder, self.base_name)
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, filename)
+
+        try:
+            from openpyxl import Workbook
+        except Exception as e:
+            logger.error(f"❌ Cannot export XLSX (openpyxl missing): {e}")
+            return None
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "metadata"
+
+            headers = list(metadata.keys())
+            values = [metadata[k] for k in headers]
+            ws.append(headers)
+            ws.append(values)
+
+            wb.save(out_path)
+            return out_path
+        except Exception as e:
+            logger.error(f"❌ Failed to write metadata XLSX: {e}")
+            return None
+
     # -------------------------------------------------------------------------
     # STEP 3 – Geolocation estimation
     # -------------------------------------------------------------------------
@@ -272,7 +399,7 @@ class PipelineProcessor:
             lat, lon = most_common
             logger.info(f"✅ Estimated coordinates: Lat={lat:.6f}, Lon={lon:.6f}")
             if predictions:
-                logger.info(f"   (from {len(predictions)} predictions)")
+                logger.debug(f"   (from {len(predictions)} predictions)")
             return (float(lat), float(lon))
 
         except Exception as e:
@@ -304,9 +431,9 @@ class PipelineProcessor:
         zoom = int(getattr(self.args, "zoom", 18))
 
         logger.info("🛰️  [Step 4] Downloading Mapbox satellite tiles...")
-        logger.info(f"   center     : ({lat:.6f}, {lon:.6f})")
-        logger.info(f"   area_size  : {area_size} m")
-        logger.info(f"   zoom       : {zoom}")
+        logger.debug(f"   center     : ({lat:.6f}, {lon:.6f})")
+        logger.debug(f"   area_size  : {area_size} m")
+        logger.debug(f"   zoom       : {zoom}")
 
         try:
             downloader = satelliteTileDownloader(
@@ -599,7 +726,7 @@ class PipelineProcessor:
         # STEP 1: Run Blender – synthetic views + model post-processing
         # ------------------------------------------------------------------
         streetviews = int(getattr(self.args, "streetviews", 3))
-        ok, M_raw = self.generate_synthetic_views(streetviews=streetviews)
+        ok, M_raw, _pivot_blender = self.generate_synthetic_views(streetviews=streetviews)
 
         if not ok:
             logger.error("⛔ Pipeline interrupted at Step 1 (Blender).")
@@ -630,9 +757,9 @@ class PipelineProcessor:
             image_width_px = img.width
 
         metric_scale = dimension_m / image_width_px
-        logger.info(f"   image width : {image_width_px} px")
-        logger.info(f"   scene width : {dimension_m:.2f} m")
-        logger.info(f"   metric scale: {metric_scale:.6f} m/px")
+        logger.info(f"✅ Metric scale computed: {metric_scale:.6f} m/px")
+        logger.debug(f"   image width : {image_width_px} px")
+        logger.debug(f"   scene width : {dimension_m:.2f} m")
 
         if not self.scale_3d_model(metric_scale):
             logger.error("⛔ Pipeline interrupted at Step 2 (Model Scaling).")
@@ -645,7 +772,7 @@ class PipelineProcessor:
             target_height_px = int(round(orig_h * target_width_px / orig_w))
             resized = img.resize((target_width_px, target_height_px), Image.Resampling.LANCZOS)
             resized.save(top_view_path)
-        logger.info(f"✅ top_view.png resized: {orig_w}x{orig_h} → {target_width_px}x{target_height_px} px")
+        logger.debug(f"✅ top_view.png resized: {orig_w}x{orig_h} → {target_width_px}x{target_height_px} px")
 
         # Store for downstream steps
         self.metric_scale = metric_scale
@@ -692,31 +819,103 @@ class PipelineProcessor:
             return False
 
         # ------------------------------------------------------------------
-        # STEP 6b: Compute pivot XY of the fully transformed model
+        # STEP 6b: Read pivot submesh center from transformed *_scaled.glb
         # ------------------------------------------------------------------
-        logger.info("📍 [Step 6b] Computing pivot XY...")
-        try:
-            dim_matrix = MatrixUtils.load_matrix(
-                os.path.join(self.working_dir, "transformation.txt")
-            )
-            pivot_calc = PivotCalculator(
-                input_mesh_path=self.args.input_file,
-                blender_matrix=M_blender,
-                metric_scale=self.metric_scale,
-                dim_matrix=dim_matrix,
-            )
-            pivot_x, pivot_y, M_total = pivot_calc.compute_pivot_xy()
-            logger.info(f"✅ Pivot XY computed: X={pivot_x:.6f}, Y={pivot_y:.6f}")
-        except Exception as exc:
-            logger.error(f"❌ PivotCalculator failed: {exc}")
-            pivot_x, pivot_y = None, None
+        logger.info("📍 [Step 6b] Reading 'pivot' submesh center from *_scaled.glb...")
+        glb_path = self._find_scaled_glb_path()
+        if not glb_path:
+            logger.error("❌ *_scaled.glb not found for pivot center extraction.")
+            return False
 
-        logger.info("=" * 60)
-        logger.info("⏹️  STOP – Step 6 complete.")
-        logger.info(f"   M_blender stored  | shape={M_blender.shape}")
-        logger.info(f"   metric_scale      | {metric_scale:.6f} m/px")
-        logger.info(f"   coordinates       | ({self.latitude:.6f}, {self.longitude:.6f})")
-        logger.info(f"   ortho_map         | {os.path.join(self.working_dir, self.base_name + '.tif')}")
-        logger.info(f"   transform_matrix  | {os.path.join(self.working_dir, 'transformation.txt')}")
-        logger.info("=" * 60)
+        pivot_center = self._extract_pivot_center_from_glb(glb_path)
+        if pivot_center is None:
+            return False
+
+        pivot_x, pivot_y, pivot_z = float(pivot_center[0]), float(pivot_center[1]), float(pivot_center[2])
+        logger.debug(
+            f"✅ Pivot center from GLB: X={pivot_x:.6f}, Y={pivot_y:.6f}, Z={pivot_z:.6f}"
+        )
+
+        latlon = self._epsg3857_to_latlon(pivot_x, pivot_y)
+        if latlon is None:
+            return False
+        pivot_lat, pivot_lon = latlon
+        logger.debug(f"✅ Pivot geographic coordinates: LAT={pivot_lat:.8f}, LON={pivot_lon:.8f}")
+
+        pivot_height = ElevationService.get_elevation(pivot_lat, pivot_lon)
+        if pivot_height is None:
+            logger.error("❌ Cannot export metadata.xlsx without pivot elevation.")
+            return False
+        logger.debug(f"✅ Pivot height from LAT/LON: H={pivot_height:.3f} m")
+
+        # ------------------------------------------------------------------
+        # STEP 6c: Export metadata.xlsx with transforms for the input GLB
+        # ------------------------------------------------------------------
+        logger.info("🧾 [Step 6c] Exporting metadata.xlsx (rotation + scale for input GLB)...")
+        m_total = self._compute_total_transform_matrix(
+            blender_matrix=M_blender,
+            metric_scale=self.metric_scale,
+            transformer=transformer,
+        )
+        if m_total is None:
+            return False
+
+        try:
+            trs = MatrixUtils.decompose_trs(m_total)
+            t = trs["translation"]
+            r = trs["rotation_euler_deg_xyz"]
+            s = trs["scale"]
+        except Exception as e:
+            logger.error(f"❌ Failed to decompose total matrix into TRS: {e}")
+            return False
+
+        # Use averaged Y scale to stabilize anisotropic scale in exported metadata.
+        scale_x = float(s[0])
+        scale_z = float(s[2])
+        scale_y = (scale_x + scale_z) / 2.0
+        logger.debug(
+            f"Scale override for metadata export: sy=avg(sx,sz) => {scale_y:.6f} (sx={scale_x:.6f}, sz={scale_z:.6f})"
+        )
+
+        # UH4D Browser convention: Y axis is up, Euler order is YXZ.
+        # Keep heading from internal Z and export as rotation around Y.
+        viewer_rot_x = 0.0
+        viewer_rot_y = float(r[2])
+        viewer_rot_z = 0.0
+        logger.debug(
+            "UH4D rotation mapping (Y-up, YXZ): "
+            f"internal XYZ=({float(r[0]):.6f},{float(r[1]):.6f},{float(r[2]):.6f}) -> "
+            f"viewer=({viewer_rot_x:.6f},{viewer_rot_y:.6f},{viewer_rot_z:.6f})"
+        )
+
+        metadata = {
+            "uid": self.base_name,
+            "src_model_name": os.path.basename(self.args.input_file),
+            "empty_1": "",  # Empty column for better readability in Excel
+            "empty_2": "",  # Empty column for better readability in Excel
+            "empty_3": "",  # Empty column for better readability in Excel
+            "pcss_geolocation_place_name": self.base_name,  # Placeholder for place name
+            "pcss_geolocation_place_description": "",
+            "pcss_geolocation_latitude": float(pivot_lat),
+            "pcss_geolocation_longitude": float(pivot_lon),
+            "pcss_geolocation_height": float(pivot_height),
+            # "translation": f"{float(t[0]):.6f},{float(t[1]):.6f},{float(t[2]):.6f}",
+            "pcss_geolocation_translation": "0.000000;0.000000;0.000000",  # Translation is not meaningful for the input GLB after DIM; set to zero.
+            "pcss_geolocation_rotation": f"{viewer_rot_x:.6f};{viewer_rot_y:.6f};{viewer_rot_z:.6f}",
+            "pcss_geolocation_rotation_order": "YXZ",
+            "pcss_geolocation_scale": f"{scale_x:.6f};{scale_y:.6f};{scale_z:.6f}",
+            "test": "test",  # Placeholder for additional metadata fields if needed
+        }
+
+        xlsx_path = self._export_metadata_xlsx(metadata)
+        if xlsx_path is None:
+            return False
+        logger.info(f"✅ Metadata XLSX exported: {xlsx_path}")
+
+        logger.info("⏹️  Pipeline completed successfully.")
+        logger.debug(f"   M_blender stored  | shape={M_blender.shape}")
+        logger.debug(f"   metric_scale      | {metric_scale:.6f} m/px")
+        logger.debug(f"   coordinates       | ({self.latitude:.6f}, {self.longitude:.6f})")
+        logger.debug(f"   ortho_map         | {os.path.join(self.working_dir, self.base_name + '.tif')}")
+        logger.debug(f"   transform_matrix  | {os.path.join(self.working_dir, 'transformation.txt')}")
         sys.exit(0)

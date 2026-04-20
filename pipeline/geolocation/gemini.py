@@ -8,11 +8,19 @@ from collections import Counter
 import time
 
 # Suppress verbose logs from Google libraries
-logging.getLogger("google").setLevel(logging.ERROR)
-logging.getLogger("google.genai").setLevel(logging.ERROR)
-logging.getLogger("google.auth").setLevel(logging.ERROR)
-logging.getLogger("urllib3").setLevel(logging.ERROR)
-logging.getLogger("requests").setLevel(logging.ERROR)
+for noisy_logger in (
+    "google",
+    "google.genai",
+    "google.auth",
+    "google.api_core",
+    "urllib3",
+    "requests",
+    "httpx",
+    "httpcore",
+):
+    logging.getLogger(noisy_logger).setLevel(logging.ERROR)
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3-flash-preview" # See here for available models: https://ai.google.dev/gemini-api/docs/models
 
@@ -225,5 +233,5 @@ class GeminiDimensionEstimator:
                  return None
 
         except Exception as e:
-            print(f"Error estimating dimension: {e}")
+            logger.error(f"Error estimating dimension: {e}")
             return None

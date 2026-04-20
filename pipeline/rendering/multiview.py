@@ -466,37 +466,65 @@ def postprocess_model(output_path, filename, corners_world, target_x):
 
     corner = max(corners_world, key=lambda v: (-v.x, v.y))
 
+    # ---- Place pivot empty at the Blender object origin (pivot point) ----
+    # After apply_transformations() the object-level TRS is baked into the mesh data,
+    # so obj.location holds the original Blender pivot in world space (typically (0,0,0)).
+    if meshes:
+        pivot_origin = meshes[0].location.copy()
+    else:
+        pivot_origin = mathutils.Vector((0.0, 0.0, 0.0))
+
+    bpy.ops.mesh.primitive_plane_add(size=1.0, location=pivot_origin)
+    pivot_obj = bpy.context.active_object
+    pivot_obj.name = "pivot"
+    # Bake the object location into vertex data so vertices are in world space,
+    # exactly like the regular meshes transformed via obj.data.transform().
+    # After this: pivot_obj.location == (0,0,0), vertices at world coords.
+    bpy.context.view_layer.objects.active = pivot_obj
+    pivot_obj.select_set(True)
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    pivot_obj.select_set(False)
+
     # Calculate translation matrix
     translation_matrix = mathutils.Matrix.Translation((-corner[0], -corner[1], 0))
-    
-    # Apply translation to all meshes
-    for obj in meshes:
+
+    # Apply translation to all meshes AND to the pivot plane data
+    for obj in meshes + [pivot_obj]:
         obj.data.transform(translation_matrix)
         obj.data.update()
-    
+
     # Calculate scale factor based on camera view width to ensure 1 unit = 1 pixel
     # corners_world[1] is bottom-right, corners_world[0] is bottom-left
     view_width = (corners_world[1] - corners_world[0]).length
     scale_fact = target_x / view_width
-    
+
     # Calculate scale matrix
     scale_matrix = mathutils.Matrix.Scale(scale_fact, 4)
-    
-    # Apply scale to all meshes
-    for obj in meshes:
+
+    # Apply scale to all meshes AND to the pivot plane data
+    for obj in meshes + [pivot_obj]:
         obj.data.transform(scale_matrix)
         obj.data.update()
-    
+
     # Calculate final transformation matrix (scale after translation)
     final_matrix = scale_matrix @ translation_matrix
-    
+
     # Convert matrix to list for JSON serialization
     matrix_list = [list(row) for row in final_matrix]
+
+    # Pivot centre: mean of its now world-space-baked vertices
+    pivot_verts = [v.co for v in pivot_obj.data.vertices]
+    pivot_pos = [
+        sum(v.x for v in pivot_verts) / len(pivot_verts),
+        sum(v.y for v in pivot_verts) / len(pivot_verts),
+        sum(v.z for v in pivot_verts) / len(pivot_verts),
+    ]
     
-    # Export GLB
+    # Export GLB (meshes + pivot plane)
     bpy.ops.object.select_all(action='DESELECT')
     for obj in meshes:
         obj.select_set(True)
+    pivot_obj.select_set(True)
     bpy.ops.export_scene.gltf(
         filepath=os.path.join(output_path, filename),
         export_format='GLB',
@@ -504,7 +532,7 @@ def postprocess_model(output_path, filename, corners_world, target_x):
         export_yup=True
     )
 
-    return matrix_list
+    return matrix_list, pivot_pos
     
 
 # ===== Function: get_ortho_camera_corners =====
@@ -635,9 +663,11 @@ if __name__ == "__main__":
 
     remove_cameras()
 
-    matrix_list = postprocess_model(output_folder, base_name+"_scaled.glb", corners_world, res_x)
+    matrix_list, pivot_pos = postprocess_model(output_folder, base_name+"_scaled.glb", corners_world, res_x)
     
     # Stampa la matrice su stdout con tag speciale per essere letta da core.py
     print("MATRIX_BLENDER:" + json.dumps(matrix_list))
+    # Stampa la posizione del pivot empty (in unità Blender pre-metric-scale)
+    print("PIVOT_BLENDER:" + json.dumps(pivot_pos))
 
     clear_scene()

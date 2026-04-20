@@ -11,12 +11,11 @@ from .dim import georef_dim
 from .dino import DinoImageMatcher, OrthoCropper
 from .transformer import (
     MatrixUtils,
-    ElevationService,
-    GeoidConverter,
     ModelAnalyzer,
     GeoTransformer,
     PivotCalculator,
 )
+from pipeline.utils.elevation import ElevationService, GeoidConverter
 
 __all__ = [
     'georef_dim',

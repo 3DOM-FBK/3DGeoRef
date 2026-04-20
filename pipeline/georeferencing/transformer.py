@@ -13,6 +13,8 @@ from typing import Optional, Union
 import numpy as np
 import trimesh
 
+from pipeline.utils.elevation import ElevationService, GeoidConverter
+
 
 log_level = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(
@@ -198,36 +200,21 @@ class PivotCalculator:
         pivot_x = float(centre[0])
         pivot_y = float(centre[1])
 
-        logger.info("📍 Pivot calculation result")
-        logger.info(f"   M_total (shape): {M_total.shape}")
+        logger.debug("📍 Pivot calculation result")
+        logger.debug(f"   M_total (shape): {M_total.shape}")
         trs = MatrixUtils.decompose_trs(M_total)
         t = trs["translation"]
         r = trs["rotation_euler_deg_xyz"]
         s = trs["scale"]
-        logger.info(f"   Total Translation: tx={t[0]:.4f}, ty={t[1]:.4f}, tz={t[2]:.4f}")
-        logger.info(f"   Total Rotation°  : rx={r[0]:.2f}, ry={r[1]:.2f}, rz={r[2]:.2f}")
-        logger.info(f"   Total Scale      : sx={s[0]:.6f}, sy={s[1]:.6f}, sz={s[2]:.6f}")
-        logger.info(f"   Bounding box min : {bb_min}")
-        logger.info(f"   Bounding box max : {bb_max}")
-        logger.info(f"   ➜  Pivot X = {pivot_x:.6f},  Pivot Y = {pivot_y:.6f}")
+        logger.debug(f"   Total Translation: tx={t[0]:.4f}, ty={t[1]:.4f}, tz={t[2]:.4f}")
+        logger.debug(f"   Total Rotation°  : rx={r[0]:.2f}, ry={r[1]:.2f}, rz={r[2]:.2f}")
+        logger.debug(f"   Total Scale      : sx={s[0]:.6f}, sy={s[1]:.6f}, sz={s[2]:.6f}")
+        logger.debug(f"   Bounding box min : {bb_min}")
+        logger.debug(f"   Bounding box max : {bb_max}")
+        logger.debug(f"   ➜  Pivot X = {pivot_x:.6f},  Pivot Y = {pivot_y:.6f}")
+
 
         return pivot_x, pivot_y, M_total
-
-
-class ElevationService:
-    """Compatibility placeholder (not used in this simplified transformer)."""
-
-    @staticmethod
-    def get_elevation(lat: float, lon: float, dataset: str = "srtm30m") -> float:
-        return 0.0
-
-
-class GeoidConverter:
-    """Compatibility placeholder (not used in this simplified transformer)."""
-
-    @staticmethod
-    def orthometric_to_ellipsoid(lat: float, lon: float, orthometric_height: float) -> float:
-        return float(orthometric_height)
 
 
 class GeoTransformer:
@@ -319,10 +306,10 @@ class GeoTransformer:
             t = trs["translation"]
             r = trs["rotation_euler_deg_xyz"]
             s = trs["scale"]
-            logger.info("📐 DIM matrix decomposition (raw transformation.txt)")
-            logger.info(f"   Translation: tx={t[0]:.6f}, ty={t[1]:.6f}, tz={t[2]:.6f}")
-            logger.info(f"   Rotation   : rx={r[0]:.6f}°, ry={r[1]:.6f}°, rz={r[2]:.6f}°  (Euler XYZ)")
-            logger.info(f"   Scale      : sx={s[0]:.6f}, sy={s[1]:.6f}, sz={s[2]:.6f}")
+            logger.debug("📐 DIM matrix decomposition (raw transformation.txt)")
+            logger.debug(f"   Translation: tx={t[0]:.6f}, ty={t[1]:.6f}, tz={t[2]:.6f}")
+            logger.debug(f"   Rotation   : rx={r[0]:.6f}°, ry={r[1]:.6f}°, rz={r[2]:.6f}°  (Euler XYZ)")
+            logger.debug(f"   Scale      : sx={s[0]:.6f}, sy={s[1]:.6f}, sz={s[2]:.6f}")
         except Exception as exc:
             logger.warning(f"⚠️ Failed to decompose DIM matrix into TRS: {exc}")
 
@@ -338,10 +325,10 @@ class GeoTransformer:
                 t2 = trs_mapped["translation"]
                 r2 = trs_mapped["rotation_euler_deg_xyz"]
                 s2 = trs_mapped["scale"]
-                logger.info("📐 Converted matrix decomposition (DIM -> trimesh)")
-                logger.info(f"   Translation: tx={t2[0]:.6f}, ty={t2[1]:.6f}, tz={t2[2]:.6f}")
-                logger.info(f"   Rotation   : rx={r2[0]:.6f}°, ry={r2[1]:.6f}°, rz={r2[2]:.6f}°  (Euler XYZ)")
-                logger.info(f"   Scale      : sx={s2[0]:.6f}, sy={s2[1]:.6f}, sz={s2[2]:.6f}")
+                logger.debug("📐 Converted matrix decomposition (DIM -> trimesh)")
+                logger.debug(f"   Translation: tx={t2[0]:.6f}, ty={t2[1]:.6f}, tz={t2[2]:.6f}")
+                logger.debug(f"   Rotation   : rx={r2[0]:.6f}°, ry={r2[1]:.6f}°, rz={r2[2]:.6f}°  (Euler XYZ)")
+                logger.debug(f"   Scale      : sx={s2[0]:.6f}, sy={s2[1]:.6f}, sz={s2[2]:.6f}")
             except Exception as exc:
                 logger.warning(f"⚠️ Failed to decompose converted matrix into TRS: {exc}")
 

@@ -18,7 +18,7 @@ from pipeline.georeferencing import georef_dim, GeoTransformer, ElevationService
 # Logger configuration
 LOG_LEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL), 
+    level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(levelname)-8s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )

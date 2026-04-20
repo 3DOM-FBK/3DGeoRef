@@ -12,6 +12,7 @@ import shutil
 from pyproj import Transformer
 import time
 import sys
+from pipeline.utils.coordinate_transforms import CoordinateTransforms
 
 
 class satelliteTileDownloader():
@@ -81,40 +82,9 @@ class satelliteTileDownloader():
         return lat, lon
 
 
-    # ===== Function: move_point_by_meters =====
     def move_point_by_meters(self, lat, lng, bearing, distance_m):
-        """
-        Calculates the new geographic coordinates by moving from an initial point
-        a certain distance along a specified bearing.
-
-        Args:
-            lat (float): Initial latitude in decimal degrees.
-            lng (float): Initial longitude in decimal degrees.
-            bearing (float): Direction of movement in degrees (0 = North, 90 = East, etc.).
-            distance_m (float): Distance to move in meters.
-
-        Returns:
-            tuple: (new_latitude, new_longitude) in decimal degrees.
-
-        Description:
-            The function uses the great-circle distance formula on a spherical Earth
-            (approximated as a sphere with mean radius R = 6378137 m) to calculate the
-            new position after moving `distance_m` meters from (lat, lng) along the
-            direction `bearing`.
-        """
-        R = 6378137  # Earth's mean radius in meters
-
-        lat_rad = np.radians(lat)
-        lng_rad = np.radians(lng)
-        bearing_rad = np.radians(bearing)
-
-        lat_new_rad = np.arcsin(np.sin(lat_rad) * np.cos(distance_m / R) +
-                                np.cos(lat_rad) * np.sin(distance_m / R) * np.cos(bearing_rad))
-
-        lng_new_rad = lng_rad + np.arctan2(np.sin(bearing_rad) * np.sin(distance_m / R) * np.cos(lat_rad),
-                                            np.cos(distance_m / R) - np.sin(lat_rad) * np.sin(lat_new_rad))
-
-        return np.degrees(lat_new_rad), np.degrees(lng_new_rad)
+        """Delegated to CoordinateTransforms centralized function."""
+        return CoordinateTransforms.move_point_by_meters(lat, lng, bearing, distance_m)
 
 
     # ===== Function: download_area_tiles =====
@@ -172,21 +142,9 @@ class satelliteTileDownloader():
         return min_x, min_y, success
 
 
-    # ===== Function: meters_per_pixel =====
     def meters_per_pixel(self, zoom, latitude):
-        """
-        Returns the ground resolution in meters/pixel at the given latitude and zoom level
-        for Web Mercator projection (EPSG:3857).
-
-        Args:
-            zoom (int): Zoom level.
-            latitude (float): Latitude in decimal degrees.
-
-        Returns:
-            float: Ground resolution in meters per pixel.
-        """
-        initial_resolution = 156543.03392804097  # meters/pixel at equator, zoom 0
-        return initial_resolution * math.cos(math.radians(latitude)) / (2 ** zoom)
+        """Delegated to CoordinateTransforms centralized function."""
+        return CoordinateTransforms.meters_per_pixel(zoom, latitude)
 
 
     # ===== Function: merge_tiles_to_geotiff =====
