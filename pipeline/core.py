@@ -65,6 +65,8 @@ class PipelineProcessor:
         os.makedirs(self.working_dir, exist_ok=True)
 
         # Optional API key override from CLI args
+        if getattr(self.args, "gemini_api_key", None):
+            os.environ["GEMINI_API_KEY"] = self.args.gemini_api_key
         if getattr(self.args, "mapbox_api_key", None):
             os.environ["MAPBOX_API_KEY"] = self.args.mapbox_api_key
 
@@ -345,36 +347,24 @@ class PipelineProcessor:
 
 
 
-    def _export_metadata_xlsx(
+    def _export_metadata_json(
         self,
         metadata: dict,
-        filename: str = "metadata.xlsx",
+        filename: str = "heritage_data.json",
     ) -> Optional[str]:
-        """Export one-row metadata workbook to output/<basename>/metadata.xlsx."""
+        """Export metadata as a JSON file to output/<basename>/heritage_data.json."""
+        import json
+
         out_dir = os.path.join(self.args.output_folder, self.base_name)
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, filename)
 
         try:
-            from openpyxl import Workbook
-        except Exception as e:
-            logger.error(f"❌ Cannot export XLSX (openpyxl missing): {e}")
-            return None
-
-        try:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "metadata"
-
-            headers = list(metadata.keys())
-            values = [metadata[k] for k in headers]
-            ws.append(headers)
-            ws.append(values)
-
-            wb.save(out_path)
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
             return out_path
         except Exception as e:
-            logger.error(f"❌ Failed to write metadata XLSX: {e}")
+            logger.error(f"❌ Failed to write metadata JSON: {e}")
             return None
 
     # -------------------------------------------------------------------------
@@ -384,21 +374,38 @@ class PipelineProcessor:
     def estimate_geolocation(self) -> Optional[tuple]:
         """
         Estimates the geographic coordinates (lat, lon) of the scene based on
-        the rendered street-view images using GeminiGeolocator.
+        the rendered street-view images using the configured geolocation model.
 
         Analyzes images in working_dir to determine GPS location with high precision.
 
         Returns:
             tuple: (latitude, longitude) as floats, or None on failure.
         """
-        logger.info("📍 [Step 3] Estimating geolocation via Gemini...")
+        geoloc_model = getattr(self.args, "geoloc_model", "gemini").lower()
+        logger.info(f"📍 [Step 3] Estimating geolocation via {geoloc_model}...")
+
         try:
-            from pipeline.geolocation.gemini import GeminiGeolocator
-            geolocator = GeminiGeolocator(model_name=self.args.gemini_model)
-            most_common, predictions = geolocator.run_pipeline(self.working_dir)
+            if geoloc_model == "geoclip":
+                from pipeline.geolocation.geoclip import GeoClipBatchPredictor
+
+                top_k = int(getattr(self.args, "nr_prediction", 1))
+                geolocator = GeoClipBatchPredictor(top_k=top_k)
+                most_common, predictions = geolocator.predict_folder(self.working_dir)
+
+            elif geoloc_model == "ollama":
+                from pipeline.geolocation.ollama import ImageToCoordinates
+
+                geolocator = ImageToCoordinates(ollama_model="llama3.2-vision")
+                most_common, predictions = geolocator.run_pipeline(self.working_dir)
+
+            else:
+                from pipeline.geolocation.gemini import GeminiGeolocator
+
+                geolocator = GeminiGeolocator(model_name=self.args.gemini_model)
+                most_common, predictions = geolocator.run_pipeline(self.working_dir)
 
             if most_common is None:
-                logger.error("❌ Gemini geolocation returned no predictions.")
+                logger.error(f"❌ {geoloc_model} geolocation returned no predictions.")
                 return None
 
             lat, lon = most_common
@@ -408,7 +415,7 @@ class PipelineProcessor:
             return (float(lat), float(lon))
 
         except Exception as e:
-            logger.error(f"❌ Error during geolocation estimation: {e}")
+            logger.error(f"❌ Error during geolocation estimation ({geoloc_model}): {e}")
             return None
 
     # -------------------------------------------------------------------------
@@ -893,27 +900,20 @@ class PipelineProcessor:
         )
 
         metadata = {
-            "uid": self.base_name,
-            "src_model_name": os.path.basename(self.args.input_file),
-            "empty_1": "",  # Empty column for better readability in Excel
-            "empty_2": "",  # Empty column for better readability in Excel
-            "empty_3": "",  # Empty column for better readability in Excel
-            "pcss_geolocation_place_name": self.base_name,  # Placeholder for place name
-            "pcss_geolocation_place_description": "",
-            "pcss_geolocation_latitude": float(pivot_lat),
-            "pcss_geolocation_longitude": float(pivot_lon),
-            "pcss_geolocation_height": float(pivot_height),
-            # "translation": f"{float(t[0]):.6f},{float(t[1]):.6f},{float(t[2]):.6f}",
-            "pcss_geolocation_translation": "0.000000;0.000000;0.000000",  # Translation is not meaningful for the input GLB after DIM; set to zero.
-            "pcss_geolocation_rotation": f"{viewer_rot_x:.6f};{viewer_rot_y:.6f};{viewer_rot_z:.6f}",
-            "pcss_geolocation_rotation_order": "YXZ",
-            "pcss_geolocation_scale": f"{scale_x:.6f};{scale_y:.6f};{scale_z:.6f}",
+            "latitude": float(pivot_lat),
+            "longitude": float(pivot_lon),
+            "height": float(pivot_height),
+            "place": "",
+            "description": "",
+            "scale": [scale_x, scale_y, scale_z],
+            "rotation": [viewer_rot_x, viewer_rot_y, viewer_rot_z],
+            "translation": [0.0, 0.0, 0.0],
         }
 
-        xlsx_path = self._export_metadata_xlsx(metadata)
-        if xlsx_path is None:
+        json_path = self._export_metadata_json(metadata)
+        if json_path is None:
             return False
-        logger.info(f"✅ Metadata XLSX exported: {xlsx_path}")
+        logger.info(f"✅ Metadata JSON exported: {json_path}")
 
         logger.info("⏹️  Pipeline completed successfully.")
         logger.debug(f"   M_blender stored  | shape={M_blender.shape}")
